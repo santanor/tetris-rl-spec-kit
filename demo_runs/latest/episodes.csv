@@ -1,4 +1,0 @@
-index,total_reward,lines_cleared,steps,terminated,truncated,interrupted,max_height,holes_final,notable_flags
-0,4.550000000000003,5,50,False,True,False,6,2,[]
-1,4.550000000000003,5,50,False,True,False,6,2,[]
-2,4.550000000000003,5,50,False,True,False,6,2,[]

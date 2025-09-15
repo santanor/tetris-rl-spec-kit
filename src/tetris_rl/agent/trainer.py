@@ -186,6 +186,7 @@ def run_training(output_dir: Path, cfg: TrainingConfig | None = None, step_callb
     cfg = cfg or TrainingConfig()
     output_dir.mkdir(parents=True, exist_ok=True)
     device = _resolve_device(cfg.device)
+    print("Training using device:", device)
 
     # ------------------- Internal helper serialization ------------------- #
     def _replay_to_dict(rb: ReplayBuffer) -> Dict[str, Any]:

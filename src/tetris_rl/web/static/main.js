@@ -1,6 +1,9 @@
 const boardEl = document.getElementById('board');
 const startBtn = document.getElementById('startBtn');
 const episodesInput = document.getElementById('episodesInput');
+const numEnvsInput = document.getElementById('numEnvsInput');
+const broadcastEveryInput = document.getElementById('broadcastEveryInput');
+const profileEveryInput = document.getElementById('profileEveryInput');
 const statEpisode = document.getElementById('statEpisode');
 const statGlobalStep = document.getElementById('statGlobalStep');
 const statReward = document.getElementById('statReward');
@@ -28,6 +31,7 @@ const liveRandomPct = document.getElementById('liveRandomPct');
 const liveGreedyPct = document.getElementById('liveGreedyPct');
 const liveBoltzPct = document.getElementById('liveBoltzPct');
 let epActionCounts = { random:0, greedy:0, boltzmann:0 };
+const envScoreboard = document.getElementById('envScoreboard');
 
 // Line clears chart data
 let lcChart; let lcLabels = []; let lcData = [];
@@ -109,8 +113,11 @@ function updateBoard(snapshot){
 
 async function startTraining(){
   const ep = parseInt(episodesInput.value)||5; 
-  // pass device if desired later (placeholder)
-  await fetch(`/api/train?episodes=${ep}`, { method:'POST'});
+  const nenv = parseInt(numEnvsInput.value)||1;
+  const be = parseInt(broadcastEveryInput.value)||1;
+  const pe = profileEveryInput ? parseInt(profileEveryInput.value)||0 : 0;
+  const qs = new URLSearchParams({ episodes:String(ep), num_envs:String(nenv), broadcast_every:String(be), profile_every:String(pe)});
+  await fetch(`/api/train?${qs.toString()}`, { method:'POST'});
 }
 startBtn.addEventListener('click', startTraining);
 
@@ -239,31 +246,24 @@ const ws = new WebSocket(`ws://${location.host}/ws`);
 ws.onmessage = (event)=>{
   const msg = JSON.parse(event.data);
   if(msg.type === 'step'){
-    statEpisode.textContent = msg.episode;
+    // Multi-env aggregated step
     statGlobalStep.textContent = msg.global_step;
-    statReward.textContent = msg.reward.toFixed(2);
     statLoss.textContent = (msg.loss||0).toFixed(4);
-    statLines.textContent = msg.lines_cleared_total;
-    statLinesDelta.textContent = msg.lines_delta;
-  updateBoard(msg.board);
-    rewardLabels.push('');
-    rewardData.push(msg.reward);
-    if(rewardData.length>500){ rewardData.shift(); rewardLabels.shift(); }
-    rewardChart.update('none');
-    // Live exploration meta
-    if(msg.epsilon != null && liveEpsilon){ liveEpsilon.textContent = msg.epsilon.toFixed(3); }
-    if(msg.temperature != null && liveTemperature && liveTemperatureWrap){
-      liveTemperatureWrap.style.display = 'inline';
-      liveTemperature.textContent = msg.temperature.toFixed(3);
-    }
-    if(msg.action_source){
-      if(epActionCounts.hasOwnProperty(msg.action_source)){
-        epActionCounts[msg.action_source] += 1;
-        const total = Object.values(epActionCounts).reduce((a,b)=>a+b,0) || 1;
-        liveRandomPct.textContent = ((epActionCounts.random/total)*100).toFixed(1);
-        liveGreedyPct.textContent = ((epActionCounts.greedy/total)*100).toFixed(1);
-        liveBoltzPct.textContent = ((epActionCounts.boltzmann/total)*100).toFixed(1);
-      }
+    // Determine best env board
+    if(msg.best_board){ updateBoard(msg.best_board); }
+    // Update scoreboard
+    if(Array.isArray(msg.envs) && envScoreboard){
+      // Sort by episode_reward descending
+      const sorted = [...msg.envs].sort((a,b)=> (b.episode_reward||0)-(a.episode_reward||0));
+      envScoreboard.innerHTML = '';
+      sorted.forEach(envInfo => {
+        const li = document.createElement('li');
+        li.style.padding='2px 4px';
+        li.style.borderBottom='1px solid #222';
+        if(envInfo.id === msg.best_env){ li.style.background='#112233'; }
+        li.textContent = `env${envInfo.id} ep${envInfo.episode} R=${(envInfo.episode_reward||0).toFixed(2)} L=${envInfo.lines_cleared} ε=${envInfo.epsilon!=null? envInfo.epsilon.toFixed(3):'-'}`;
+        envScoreboard.appendChild(li);
+      });
     }
   } else if(msg.type === 'episode_end'){
     addEpisodeReward(msg.episode, msg.reward, msg.line_clears, msg.avg_structural);

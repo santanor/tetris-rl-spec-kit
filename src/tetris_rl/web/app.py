@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import os
 from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -44,11 +45,21 @@ async def root():
     # fallback redirect to /static/ if directory mounted
     return RedirectResponse(url="/static/")
 
+HEADLESS = os.getenv("HEADLESS", "") == "1"
+
 async def broadcast(message: Dict[str, Any]):
+    """Send a JSON-serializable message to all connected websocket clients.
+
+    In headless mode (env var HEADLESS=1), this becomes a no-op so that
+    training can run in CI or servers without incurring websocket overhead
+    or requiring any active UI clients.
+    """
+    if HEADLESS:
+        return
     if not websocket_clients:
         return
     data = json.dumps(message)
-    to_remove = []
+    to_remove: list[WebSocket] = []
     for ws in websocket_clients:
         try:
             await ws.send_text(data)
@@ -72,7 +83,15 @@ async def ws_endpoint(websocket: WebSocket):
         if websocket in websocket_clients:
             websocket_clients.remove(websocket)
 
-async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto", resume_from: Optional[str] = None):
+async def training_loop(
+    output_dir: Path,
+    episodes: int,
+    device_str: str = "auto",
+    resume_from: Optional[str] = None,
+    num_envs: int = 1,
+    broadcast_every: int = 1,
+    profile_every: int = 0,
+):
     global current_board
     from tetris_rl.env.tetris_env import TetrisEnv
     from tetris_rl.models.episode import Episode
@@ -94,10 +113,10 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
         asyncio.get_event_loop().create_task(broadcast({"type": "step", **step_info}))
 
     # We'll run a light-weight manual loop replicating run_training but exposing board each step.
-    import math, random, torch
+    import math, random, torch, time
     from tetris_rl.agent.dqn import DQN
     from tetris_rl.agent.replay_buffer import ReplayBuffer
-    from tetris_rl.agent.trainer import select_action, optimize, _resolve_device
+    from tetris_rl.agent.trainer import select_action, optimize, _resolve_device, _compute_epsilon, _compute_temperature
 
     device = _resolve_device(cfg.device)
     rng = random.Random(cfg.seed)
@@ -194,102 +213,239 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
         except Exception as e:  # log but continue training
             asyncio.create_task(broadcast({"type": "checkpoint_error", "error": str(e)}))
 
-    for ep_idx in range(base_episode, base_episode + cfg.episodes):
-        # Pass shared reward_config so runtime changes propagate to new episodes
-        env = TetrisEnv(seed=rng.randint(0, 1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
-        state, _ = env.reset()
-        episode = Episode(index=ep_idx)
-        line_clears_this_ep = 0
-        structural_sum = {"holes":0.0, "height":0.0, "bumpiness":0.0}
-        structural_steps = 0
-        action_counts = {"random":0, "greedy":0, "boltzmann":0}
-        last_eps = None
-        last_temp = None
-        done = False
-        truncated = False
-        while not (done or truncated):
-            # Access underlying board through env
-            current_board = env.board
-            import torch as _torch
-            state_t = _torch.tensor(state, dtype=_torch.float32, device=device)
+    # ---------------- Multi-env synchronous loop ---------------- #
+    num_envs = max(1, int(num_envs))
+    broadcast_every = max(1, int(broadcast_every))
+    profile_every = max(0, int(profile_every))
+    from tetris_rl.utils.profiler import Profiler, SectionTimer
+    profiler = Profiler(interval_steps=profile_every) if profile_every > 0 else None
+    from tetris_rl.env.tetris_env import TetrisEnv as _TEnv
+    envs: list[_TEnv] = []
+    states: list[Any] = []
+    episodes_done = [0]*num_envs  # episodes completed per env
+    episode_objs: list[Episode] = []
+    episode_rewards_current = [0.0]*num_envs
+    episode_lineclears_current = [0]*num_envs
+    structural_sum_list = [{"holes":0.0, "height":0.0, "bumpiness":0.0} for _ in range(num_envs)]
+    structural_steps_list = [0]*num_envs
+    action_counts_list = [{"random":0, "greedy":0, "boltzmann":0} for _ in range(num_envs)]
+    last_eps_list: list[Optional[float]] = [None]*num_envs
+    last_temp_list: list[Optional[float]] = [None]*num_envs
+    active_mask = [True]*num_envs
+
+    for i in range(num_envs):
+        e = TetrisEnv(seed=rng.randint(0, 1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
+        s, _ = e.reset()
+        envs.append(e)  # type: ignore[arg-type]
+        states.append(s)
+        episode_objs.append(Episode(index=0))
+
+    # Preallocate contiguous numpy buffer for fast stacking (avoids slow per-step python list -> tensor path)
+    import numpy as _np
+    state_dim = len(states[0]) if states else 0
+    state_buffer = _np.zeros((num_envs, state_dim), dtype=_np.float32)
+
+    def _select_actions(batch_states_tensor):
+        # Vectorized forward once, then per-env exploration.
+        with torch.no_grad():
+            q_batch = policy_net(batch_states_tensor)
+        acts = []
+        metas = []
+        for idx in range(len(envs)):
+            if not active_mask[idx]:
+                acts.append(0)
+                metas.append({})
+                continue
             # Re-apply mutable exploration overrides each step for live tuning
             for _k in ("epsilon_start","epsilon_end","epsilon_decay","epsilon_schedule","epsilon_mid","epsilon_mid_step","exploration_strategy","temperature_start","temperature_end","temperature_decay"):
                 if _k in training_overrides:
                     setattr(cfg, _k, training_overrides[_k])
-            action, meta = select_action(policy_net, state_t, global_step, cfg, 5)
-            # Track exploration meta
-            src = meta.get("action_source", "?")
-            if src in action_counts:
-                action_counts[src] += 1
-            last_eps = meta.get("epsilon", last_eps)
-            last_temp = meta.get("temperature", last_temp)
+            eps = float(_compute_epsilon(global_step, cfg))
+            action_source = "greedy"
+            temperature = None
+            q_row = q_batch[idx]
+            if cfg.exploration_strategy == "boltzmann":
+                temperature = _compute_temperature(global_step, cfg)
+                logits = q_row / temperature
+                probs = torch.softmax(logits, dim=0)
+                a = int(torch.multinomial(probs, 1).item())
+                action_source = "boltzmann"
+            else:
+                if random.random() < eps:
+                    a = random.randrange(5)
+                    action_source = "random"
+                else:
+                    a = int(q_row.argmax().item())
+                    action_source = "greedy"
+            meta = {"epsilon": eps, "action_source": action_source}
+            if temperature is not None:
+                meta["temperature"] = float(temperature)
+            acts.append(a)
+            metas.append(meta)
+        return acts, metas
+
+    # Total episodes target refers to per-env episodes (consistent with prior semantics)
+    while any(episodes_done[i] < cfg.episodes for i in range(num_envs)):
+        # Build batch state tensor for active envs
+        import torch as _torch
+        # Populate preallocated numpy buffer
+        for _i in range(num_envs):
+            if active_mask[_i]:
+                state_buffer[_i] = states[_i]
+        batch_states = _torch.from_numpy(state_buffer).to(device)
+        actions, metas = _select_actions(batch_states)
+        # Step each env
+        t_env_start = None
+        if profiler:
+            t_env_start = time.perf_counter()
+        for i, env in enumerate(envs):
+            if not active_mask[i]:
+                continue
+            action = actions[i]
             next_state, reward, done, truncated, info = env.step(action)
-            buffer.push(state, action, reward, next_state, done or truncated)
-            episode.record_step(reward, info.get("lines_delta", 0), int(next_state[3]), int(next_state[2]))
-            state = next_state
-            loss_val = optimize(policy_net, target_net, buffer, cfg, optimizer, device)
-            if global_step % cfg.target_sync == 0:
-                target_net.load_state_dict(policy_net.state_dict())
-            global_step += 1
-            # broadcast
-            step_payload = {
-                "episode": ep_idx,
-                "global_step": global_step,
-                "reward": reward,
-                "loss": loss_val,
-                "lines_cleared_total": info.get("lines_cleared_total"),
-                "lines_delta": info.get("lines_delta"),
-                "board": current_board.snapshot() if current_board else None,
-                "reward_components": info.get("reward_components"),
-                "epsilon": last_eps,
-                "temperature": last_temp,
-                "action_source": src,
-            }
+            buffer.push(states[i], action, reward, next_state, (done or truncated))
+            episode_objs[i].record_step(reward, info.get("lines_delta",0), int(next_state[3]), int(next_state[2]))
+            episode_rewards_current[i] += reward
             if info.get("lines_delta"):
-                line_clears_this_ep += info.get("lines_delta",0)
+                episode_lineclears_current[i] += info.get("lines_delta",0)
+            # Structural accumulation for averages
             rc = info.get("reward_components") or {}
             sb = rc.get("structural_breakdown") or {}
-            for k in structural_sum:
-                structural_sum[k] += float(sb.get(k,0.0))
-            structural_steps += 1
-            await broadcast({"type": "step", **step_payload})
-            # Save checkpoint every 20 global steps (and not on step 0)
-            if global_step > 0 and (global_step % 20 == 0):
-                _save_dashboard_checkpoint(ep_idx, final=False)
-            await asyncio.sleep(0)  # yield control
-        episode.finalize(terminated=bool(done), truncated=bool(truncated), interrupted=False, reason=None)
-        session_reward += episode.total_reward
-        env.close()
-        avg_struct = {k: (v/structural_steps if structural_steps else 0.0) for k,v in structural_sum.items()}
-        # Aggregate action source distribution
-        total_actions = sum(action_counts.values()) or 1
-        action_dist = {k: v/total_actions for k,v in action_counts.items()}
-        await broadcast({
-            "type": "episode_end",
-            "episode": ep_idx,
-            "reward": episode.total_reward,
-            "line_clears": line_clears_this_ep,
-            "avg_structural": avg_struct,
-            "action_dist": action_dist,
-            "last_epsilon": last_eps,
-            "last_temperature": last_temp,
-        })
-    # (No per-episode checkpoint; handled by step cadence)
+            for k in structural_sum_list[i]:
+                structural_sum_list[i][k] += float(sb.get(k,0.0))
+            structural_steps_list[i] += 1
+            # Exploration meta
+            m = metas[i]
+            src = m.get("action_source")
+            if src in action_counts_list[i]:
+                action_counts_list[i][src] += 1
+            last_eps_list[i] = m.get("epsilon", last_eps_list[i])
+            last_temp_list[i] = m.get("temperature", last_temp_list[i])
+            states[i] = next_state
+            if done or truncated:
+                episode_objs[i].finalize(terminated=bool(done), truncated=bool(truncated), interrupted=False, reason=None)
+                session_reward += episode_objs[i].total_reward
+                episodes_done[i] += 1
+                # Broadcast episode end for this env
+                avg_struct = {k: (v/structural_steps_list[i] if structural_steps_list[i] else 0.0) for k,v in structural_sum_list[i].items()}
+                total_actions = sum(action_counts_list[i].values()) or 1
+                action_dist = {k: v/total_actions for k,v in action_counts_list[i].items()}
+                await broadcast({
+                    "type": "episode_end",
+                    "env_id": i,
+                    "episode": episode_objs[i].index,
+                    "reward": episode_objs[i].total_reward,
+                    "line_clears": episode_lineclears_current[i],
+                    "avg_structural": avg_struct,
+                    "action_dist": action_dist,
+                    "last_epsilon": last_eps_list[i],
+                    "last_temperature": last_temp_list[i],
+                })
+                # Prepare next episode if still needed
+                if episodes_done[i] < cfg.episodes:
+                    env.close()
+                    envs[i] = TetrisEnv(seed=rng.randint(0,1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
+                    s2,_ = envs[i].reset()
+                    states[i] = s2
+                    episode_objs[i] = Episode(index=episodes_done[i])
+                    episode_rewards_current[i] = 0.0
+                    episode_lineclears_current[i] = 0
+                    structural_sum_list[i] = {"holes":0.0, "height":0.0, "bumpiness":0.0}
+                    structural_steps_list[i] = 0
+                    action_counts_list[i] = {"random":0, "greedy":0, "boltzmann":0}
+                else:
+                    active_mask[i] = False
+        # Record env step time
+        if profiler and t_env_start is not None:
+            profiler.record("env_step", time.perf_counter() - t_env_start)
 
-    # Final checkpoint
-    _save_dashboard_checkpoint(base_episode + cfg.episodes - 1, final=True)
-    await broadcast({"type": "session_end", "episodes": cfg.episodes, "avg_reward": session_reward / cfg.episodes})
+        # Optimize once per multi-env step
+        t_opt_start = None
+        if profiler:
+            t_opt_start = time.perf_counter()
+        loss_val = optimize(policy_net, target_net, buffer, cfg, optimizer, device)
+        if profiler and t_opt_start is not None:
+            profiler.record("optimize", time.perf_counter() - t_opt_start)
+        if global_step % cfg.target_sync == 0:
+            target_net.load_state_dict(policy_net.state_dict())
+        global_step += 1
+
+        # Periodic checkpoint
+        if global_step > 0 and (global_step % 20 == 0):
+            # Use best performing env's current episode index for metadata
+            t_ckpt_start = None
+            if profiler:
+                t_ckpt_start = asyncio.get_event_loop().time()
+            _save_dashboard_checkpoint(max(episodes_done) - 1 if max(episodes_done)>0 else 0, final=False)
+            if profiler and t_ckpt_start is not None:
+                profiler.record("checkpoint", asyncio.get_event_loop().time() - t_ckpt_start)
+
+        # Broadcast (throttled)
+        if (global_step % broadcast_every) == 0:
+            # Determine best performer (highest current episode reward among active, else last finished)
+            best_idx = None
+            best_val = float('-inf')
+            for i in range(num_envs):
+                val = episode_rewards_current[i]
+                if active_mask[i] and val >= best_val:
+                    best_val = val
+                    best_idx = i
+            if best_idx is None:
+                # fallback to env with highest total reward
+                best_idx = max(range(num_envs), key=lambda i: episode_rewards_current[i])
+            current_board = envs[best_idx].board if active_mask[best_idx] else envs[best_idx].board
+            envs_payload = []
+            for i in range(num_envs):
+                envs_payload.append({
+                    "id": i,
+                    "episode": episode_objs[i].index,
+                    "episode_reward": episode_rewards_current[i],
+                    "lines_cleared": envs[i].board.lines_cleared_total,
+                    "epsilon": last_eps_list[i],
+                    "temperature": last_temp_list[i],
+                    "active": active_mask[i],
+                })
+            t_broadcast_start = None
+            if profiler:
+                t_broadcast_start = asyncio.get_event_loop().time()
+            await broadcast({
+                "type": "step",
+                "global_step": global_step,
+                "loss": loss_val,
+                "best_env": best_idx,
+                "best_board": current_board.snapshot() if current_board else None,
+                "envs": envs_payload,
+            })
+            if profiler and t_broadcast_start is not None:
+                profiler.record("broadcast", asyncio.get_event_loop().time() - t_broadcast_start)
+
+        # Profile report if due
+        if profiler:
+            rep = profiler.maybe_report(global_step)
+            if rep:
+                # Print concise console line and broadcast full payload
+                interval = rep.get("interval", {})
+                env_pct = interval.get("env_step", {}).get("pct", 0)
+                opt_pct = interval.get("optimize", {}).get("pct", 0)
+                print(f"[PROFILE] step={global_step} env_step={env_pct:.1f}% optimize={opt_pct:.1f}%")
+                await broadcast(rep)
+        await asyncio.sleep(0)
+
+    # Final checkpoint & session end
+    _save_dashboard_checkpoint(max(episodes_done)-1 if max(episodes_done)>0 else 0, final=True)
+    total_episodes_all = sum(episodes_done)
+    await broadcast({"type": "session_end", "episodes": total_episodes_all, "avg_reward": session_reward / float(total_episodes_all or 1)})
 
 @app.post("/api/train")
-async def start_training(episodes: int = 5, device: str = "auto"):
+async def start_training(episodes: int = 5, device: str = "auto", num_envs: int = 1, broadcast_every: int = 1, profile_every: int = 0):
     global training_task
     if training_task and not training_task.done():
         return {"status": "already-running"}
-    training_task = asyncio.create_task(training_loop(Path("training_runs/dashboard"), episodes, device))
-    return {"status": "started", "episodes": episodes, "device": device}
+    training_task = asyncio.create_task(training_loop(Path("training_runs/dashboard"), episodes, device, None, num_envs, broadcast_every, profile_every))
+    return {"status": "started", "episodes": episodes, "device": device, "num_envs": num_envs, "broadcast_every": broadcast_every, "profile_every": profile_every}
 
 @app.post("/api/resume")
-async def resume_training(checkpoint: str, episodes: int = 5, device: str = "auto"):
+async def resume_training(checkpoint: str, episodes: int = 5, device: str = "auto", num_envs: int = 1, broadcast_every: int = 1, profile_every: int = 0):
     """Resume training from a checkpoint path (relative or absolute).
 
     Parameters:
@@ -317,8 +473,8 @@ async def resume_training(checkpoint: str, episodes: int = 5, device: str = "aut
                 ckpt_path = alt2
             else:
                 return {"status": "error", "error": f"Checkpoint not found: {checkpoint}"}
-    training_task = asyncio.create_task(training_loop(Path("training_runs/dashboard"), episodes, device, resume_from=str(ckpt_path)))
-    return {"status": "resuming", "from": str(ckpt_path), "episodes": episodes, "device": device}
+    training_task = asyncio.create_task(training_loop(Path("training_runs/dashboard"), episodes, device, str(ckpt_path), num_envs, broadcast_every, profile_every))
+    return {"status": "resuming", "from": str(ckpt_path), "episodes": episodes, "device": device, "num_envs": num_envs, "broadcast_every": broadcast_every, "profile_every": profile_every}
 
 @app.get("/api/training-config")
 async def get_training_config():

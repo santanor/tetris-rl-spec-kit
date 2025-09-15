@@ -9,14 +9,22 @@
 <body>
   <header>
     <h1>Tetris RL Dashboard</h1>
-    <button id="startBtn">Start Training</button>
-    <label>Episodes <input id="episodesInput" type="number" value="5" min="1" max="200"/></label>
+  <button id="startBtn">Start Training</button>
+  <label>Episodes <input id="episodesInput" type="number" value="5" min="1" max="200"/></label>
+  <label>Envs <input id="numEnvsInput" type="number" value="1" min="1" max="32" style="width:60px;"/></label>
+  <label>Broadcast Every <input id="broadcastEveryInput" type="number" value="1" min="1" max="500" style="width:80px;"/></label>
+  <label>Profile Every <input id="profileEveryInput" type="number" value="0" min="0" max="10000" style="width:90px;"/></label>
   </header>
   <main>
     <section class="board-section">
       <h2>Board</h2>
       <pre id="board"></pre>
       <div id="colorBoard" class="color-board" aria-label="Color Board" role="img"></div>
+      <div style="margin-top:0.5rem;">
+        <h3 style="margin:0 0 0.25rem;">Environments</h3>
+        <ul id="envScoreboard" style="list-style:none;padding:0;margin:0;font-size:0.7rem;max-height:160px;overflow:auto;border:1px solid #2a2a2a;border-radius:4px;"></ul>
+        <small style="color:#777;">Best (highest current episode reward) is displayed above.</small>
+      </div>
     </section>
     <section class="stats-section">
       <h2>Live Stats</h2>
