@@ -26,6 +26,7 @@ reward_config = RewardConfig()  # shared mutable config
 training_overrides: Dict[str, Any] = {}  # holds mutable training hyperparameters (epsilon / temperature / exploration)
 # Model config overrides (applied to new DQN instantiation each session; not hot-swapped mid-episode)
 model_overrides: Dict[str, Any] = {}
+current_sweep_task: Optional[asyncio.Task] = None
 
 @app.get("/api/session")
 async def get_session():
@@ -213,6 +214,52 @@ async def training_loop(
         except Exception as e:  # log but continue training
             asyncio.create_task(broadcast({"type": "checkpoint_error", "error": str(e)}))
 
+    # Track best performing episode (by reward)
+    best_episode_reward: float = float('-inf')
+    best_episode_meta: Dict[str, Any] = {}
+
+    def _save_best_checkpoint(meta: Dict[str, Any]):
+        """Persist a 'best model' snapshot with richer metadata so it can be moved to another machine.
+
+        We include model architecture config, reward config and training overrides so that
+        resuming or inspecting elsewhere has context. Replay buffer is NOT included (can be large).
+        """
+        try:
+            import torch as _torch
+            ckpt = {
+                "type": "best_model",
+                "model": policy_net.state_dict(),
+                "target_model": target_net.state_dict(),
+                "optimizer": optimizer.state_dict(),  # optional (may not be used later)
+                "global_step": global_step,
+                "episode_index": meta.get("episode"),
+                "episode_reward": meta.get("reward"),
+                "lines_cleared": meta.get("line_clears"),
+                "env_id": meta.get("env_id"),
+                "board_snapshot": meta.get("board_snapshot"),
+                "config": {
+                    "model_overrides": model_overrides.copy(),
+                    "training_overrides": training_overrides.copy(),
+                    "reward_config": reward_config.to_dict(),
+                    "hidden_layers": cfg.hidden_layers,
+                    "dueling": cfg.dueling,
+                    "use_layer_norm": cfg.use_layer_norm,
+                    "dropout": cfg.dropout,
+                },
+            }
+            best_path = static_checkpoint_dir / "dashboard_checkpoint_best.pt"
+            _torch.save(ckpt, best_path)
+            asyncio.create_task(broadcast({
+                "type": "best_checkpoint_saved",
+                "checkpoint": best_path.name,
+                "episode": meta.get("episode"),
+                "reward": meta.get("reward"),
+                "lines_cleared": meta.get("line_clears"),
+                "env_id": meta.get("env_id"),
+            }))
+        except Exception as e:  # log but continue
+            asyncio.create_task(broadcast({"type": "best_checkpoint_error", "error": str(e)}))
+
     # ---------------- Multi-env synchronous loop ---------------- #
     num_envs = max(1, int(num_envs))
     broadcast_every = max(1, int(broadcast_every))
@@ -341,6 +388,18 @@ async def training_loop(
                     "last_epsilon": last_eps_list[i],
                     "last_temperature": last_temp_list[i],
                 })
+                # Best model logic: track highest episode reward so far
+                if episode_objs[i].total_reward > best_episode_reward:
+                    best_episode_reward = episode_objs[i].total_reward
+                    board_snap = envs[i].board.snapshot() if envs[i].board else None
+                    best_episode_meta = {
+                        "env_id": i,
+                        "episode": episode_objs[i].index,
+                        "reward": episode_objs[i].total_reward,
+                        "line_clears": episode_lineclears_current[i],
+                        "board_snapshot": board_snap,
+                    }
+                    _save_best_checkpoint(best_episode_meta)
                 # Prepare next episode if still needed
                 if episodes_done[i] < cfg.episodes:
                     env.close()
@@ -435,6 +494,9 @@ async def training_loop(
     _save_dashboard_checkpoint(max(episodes_done)-1 if max(episodes_done)>0 else 0, final=True)
     total_episodes_all = sum(episodes_done)
     await broadcast({"type": "session_end", "episodes": total_episodes_all, "avg_reward": session_reward / float(total_episodes_all or 1)})
+    # At session end also broadcast best summary if exists
+    if best_episode_meta:
+        await broadcast({"type": "best_summary", **best_episode_meta})
 
 @app.post("/api/train")
 async def start_training(episodes: int = 5, device: str = "auto", num_envs: int = 1, broadcast_every: int = 1, profile_every: int = 0):
@@ -460,6 +522,8 @@ async def resume_training(checkpoint: str, episodes: int = 5, device: str = "aut
     static_checkpoint_dir = Path(__file__).parent / "static"
     if checkpoint == "latest":
         ckpt_path = static_checkpoint_dir / "dashboard_checkpoint_latest.pt"
+    elif checkpoint == "best":
+        ckpt_path = static_checkpoint_dir / "dashboard_checkpoint_best.pt"
     else:
         ckpt_path = Path(checkpoint)
     if not ckpt_path.is_file():
@@ -475,6 +539,30 @@ async def resume_training(checkpoint: str, episodes: int = 5, device: str = "aut
                 return {"status": "error", "error": f"Checkpoint not found: {checkpoint}"}
     training_task = asyncio.create_task(training_loop(Path("training_runs/dashboard"), episodes, device, str(ckpt_path), num_envs, broadcast_every, profile_every))
     return {"status": "resuming", "from": str(ckpt_path), "episodes": episodes, "device": device, "num_envs": num_envs, "broadcast_every": broadcast_every, "profile_every": profile_every}
+
+@app.get("/api/best-checkpoint")
+async def get_best_checkpoint():
+    """Return metadata of best checkpoint if it exists (does not return raw weights)."""
+    best_path = Path(__file__).parent / "static" / "dashboard_checkpoint_best.pt"
+    if not best_path.is_file():
+        return {"exists": False}
+    try:
+        import torch
+        loaded = torch.load(best_path, map_location="cpu")
+        meta = {
+            "exists": True,
+            "checkpoint": best_path.name,
+            "episode": loaded.get("episode_index"),
+            "reward": loaded.get("episode_reward"),
+            "lines_cleared": loaded.get("lines_cleared"),
+            "env_id": loaded.get("env_id"),
+            "board_snapshot": loaded.get("board_snapshot"),
+            "global_step": loaded.get("global_step"),
+            "config": loaded.get("config"),
+        }
+        return meta
+    except Exception as e:
+        return {"exists": False, "error": str(e)}
 
 @app.get("/api/training-config")
 async def get_training_config():
@@ -514,6 +602,134 @@ async def update_training_config(payload: Dict[str, Any]):
                 changed[k] = v
     await broadcast({"type": "training_config_update", "overrides": training_overrides})
     return {"updated": changed, "overrides": training_overrides}
+
+@app.post("/api/sweep")
+async def start_reward_sweep(trials: int = 30, episodes_stage1: int = 40, episodes_stage2: int = 120, seeds_stage1: int = 1, seeds_stage2: int = 2, topk: int = 5, device: str = "auto"):
+    """Launch a background Bayesian reward sweep (Optuna) using same architecture overrides.
+
+    Returns immediately with a status token; progress is broadcast via websocket messages:
+      - sweep_progress
+      - sweep_complete
+    Artifacts saved under sweep_artifacts/ .
+    """
+    global current_sweep_task
+    if current_sweep_task and not current_sweep_task.done():
+        return {"status": "already-running"}
+
+    async def _run_sweep():
+        import optuna, random, statistics, json, math, torch
+        from dataclasses import asdict
+        from tetris_rl.env.reward_config import RewardConfig
+        from tetris_rl.agent.trainer import optimize, _compute_epsilon, _compute_temperature, _resolve_device
+        from tetris_rl.agent.dqn import DQN
+        from tetris_rl.agent.replay_buffer import ReplayBuffer
+        from tetris_rl.env.tetris_env import TetrisEnv
+        from tetris_rl.agent.trainer import TrainingConfig
+        out_dir = Path("sweep_artifacts")
+        out_dir.mkdir(exist_ok=True)
+
+        hidden = model_overrides.get("hidden_layers") or TrainingConfig().hidden_layers or [256,256,256]
+        dueling = model_overrides.get("dueling", TrainingConfig().dueling)
+        use_ln = model_overrides.get("use_layer_norm", TrainingConfig().use_layer_norm)
+        dropout = model_overrides.get("dropout", TrainingConfig().dropout)
+
+        def suggest(trial: optuna.Trial) -> RewardConfig:
+            rc = RewardConfig()
+            rc.line_reward_1 = trial.suggest_float("line_reward_1", 0.05, 0.4)
+            rc.line_reward_2 = trial.suggest_float("line_reward_2", 0.1, 0.8)
+            rc.line_reward_3 = trial.suggest_float("line_reward_3", 0.2, 1.4)
+            rc.line_reward_4 = trial.suggest_float("line_reward_4", 0.5, 3.0)
+            rc.survival_bonus = trial.suggest_float("survival_bonus", 0.0, 0.02)
+            rc.step_penalty = trial.suggest_float("step_penalty", -0.015, 0.0)
+            rc.top_out_penalty = trial.suggest_float("top_out_penalty", -5.0, -0.5)
+            for name, low, high in [
+                ("holes_weight", 1e-4, 5e-2),
+                ("holes_abs_weight", 1e-4, 5e-2),
+                ("weighted_holes_weight", 1e-4, 5e-2),
+                ("weighted_holes_abs_weight", 1e-4, 5e-2),
+                ("height_weight", 1e-4, 1e-2),
+                ("bumpiness_weight", 1e-4, 1e-2),
+                ("row_density_delta_weight", 1e-4, 5e-2),
+                ("row_density_abs_weight", 1e-4, 5e-2),
+            ]:
+                setattr(rc, name, trial.suggest_float(name, low, high, log=True))
+            rc.row_density_line_clear_scale = trial.suggest_float("row_density_line_clear_scale", 0.0, 3.0)
+            rc.holes_depth_power = trial.suggest_float("holes_depth_power", 0.8, 3.2)
+            return rc
+
+        pruner = optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=1)
+        sampler = optuna.samplers.TPESampler(multivariate=True, seed=1234)
+        study = optuna.create_study(direction="maximize", pruner=pruner, sampler=sampler)
+
+        def eval_once(rc: RewardConfig, episodes: int, seed: int) -> float:
+            cfg = TrainingConfig(episodes=episodes, device=device, hidden_layers=hidden, dueling=dueling, use_layer_norm=use_ln, dropout=dropout)
+            dev = _resolve_device(cfg.device)
+            rng = random.Random(seed)
+            policy = DQN((4,),5, hidden_layers=hidden, dueling=dueling, use_layer_norm=use_ln, dropout=dropout).to(dev)
+            target = DQN((4,),5, hidden_layers=hidden, dueling=dueling, use_layer_norm=use_ln, dropout=dropout).to(dev)
+            target.load_state_dict(policy.state_dict())
+            opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr)
+            replay = ReplayBuffer(cfg.replay_capacity, seed)
+            global_step = 0
+            ep_rewards = []
+            for ep in range(episodes):
+                env = TetrisEnv(seed=rng.randint(0,1_000_000), max_steps=cfg.max_steps, reward_config=rc)
+                state,_ = env.reset()
+                done=False; truncated=False; total=0.0
+                while not (done or truncated):
+                    eps = float(_compute_epsilon(global_step, cfg))
+                    if random.random() < eps:
+                        a = random.randrange(5)
+                    else:
+                        with torch.no_grad():
+                            q = policy(torch.tensor(state, dtype=torch.float32, device=dev).unsqueeze(0))
+                        a = int(q.argmax().item())
+                    ns, r, done, truncated, info = env.step(a)
+                    replay.push(state, a, r, ns, (done or truncated))
+                    state = ns
+                    total += r
+                    _ = optimize(policy, target, replay, cfg, opt, dev)
+                    global_step += 1
+                    if global_step % cfg.target_sync == 0:
+                        target.load_state_dict(policy.state_dict())
+                ep_rewards.append(total)
+                env.close()
+            return sum(ep_rewards)/len(ep_rewards)
+
+        def objective(trial: optuna.Trial):
+            rc = suggest(trial)
+            seeds = [9000 + i for i in range(seeds_stage1)]
+            scores = []
+            for idx,s in enumerate(seeds):
+                val = eval_once(rc, episodes_stage1, s)
+                scores.append(val)
+                trial.report(sum(scores)/len(scores), step=idx+1)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+            mean_score = sum(scores)/len(scores)
+            asyncio.create_task(broadcast({"type":"sweep_progress","trial":trial.number,"score":mean_score}))
+            return mean_score
+
+        study.optimize(objective, n_trials=trials, show_progress_bar=False)
+        # Stage2 re-eval topK
+        complete = [t for t in study.trials if t.value is not None and t.state.name=='COMPLETE']
+        complete.sort(key=lambda t: t.value, reverse=True)
+        finalists = complete[:topk]
+        stage2 = []
+        for t in finalists:
+            rc = RewardConfig()
+            for k,v in t.params.items():
+                if hasattr(rc,k): setattr(rc,k,v)
+            seeds2 = [12000+i for i in range(seeds_stage2)]
+            vals = [eval_once(rc, episodes_stage2, s) for s in seeds2]
+            stage2.append({"trial": t.number, "stage1": t.value, "stage2_mean": sum(vals)/len(vals), "params": t.params})
+        stage2.sort(key=lambda x: x['stage2_mean'], reverse=True)
+        with (out_dir/"sweep_results.json").open('w') as f:
+            json.dump({"stage1_best": [ {"trial":t.number, "value":t.value, "params":t.params} for t in finalists ], "stage2": stage2}, f, indent=2)
+        asyncio.create_task(broadcast({"type":"sweep_complete","best": stage2[0] if stage2 else None}))
+
+    current_sweep_task = asyncio.create_task(_run_sweep())
+    return {"status": "started", "trials": trials}
 
 @app.get("/api/reward-config")
 async def get_reward_config():

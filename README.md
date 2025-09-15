@@ -29,6 +29,90 @@ Run a quick training demo (non-visual):
 python scripts/train_demo.py
 ```
 
+## Reward Shaping Bayesian Sweep (Optuna)
+
+You can run an automated Bayesian optimization sweep over reward shaping parameters to discover better weights.
+
+### Script-Based (Offline)
+
+Install dependencies (Optuna already listed in `pyproject.toml`):
+
+```bash
+pip install -e .
+python scripts/reward_sweep.py --trials 60 --episodes-stage1 40 --episodes-stage2 120 --seeds-stage2 2 --final-topk 5
+```
+
+Artifacts are written to `sweep_artifacts/`:
+
+| File | Description |
+|------|-------------|
+| `study_stage1.json` | Stage 1 trial results (pruned + complete) |
+| `stage2_results.json` | Re-evaluation of top-K with longer runs & more seeds |
+| `best_reward_config.json` | Concise best configuration summary |
+
+Example to load best config into the running dashboard session:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/reward-config \
+  -H 'Content-Type: application/json' \
+  -d @sweep_artifacts/best_reward_config.json
+```
+
+If the JSON structure differs (wrapped fields), extract the `params` object before posting.
+
+### API Endpoint (Background Sweep)
+
+Start the server:
+
+```bash
+python -m uvicorn tetris_rl.web.app:app --reload
+```
+
+Launch a sweep via the new endpoint:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/sweep?trials=40&episodes_stage1=40&episodes_stage2=120&topk=5'
+```
+
+Progress & completion events are broadcast over the WebSocket as:
+
+```json
+{ "type": "sweep_progress", "trial": 12, "score": 0.73 }
+{ "type": "sweep_complete", "best": { ... } }
+```
+
+Artifacts are saved under `sweep_artifacts/sweep_results.json` and include both Stage 1 top-K and Stage 2 re-evaluations.
+
+### Objective Function
+
+Current objective = mean_episode_reward (Stage 1) + re-evaluated mean (Stage 2). You can adjust weighting between reward and lines cleared inside `scripts/reward_sweep.py` (see `objective_value` aggregation) or the `/api/sweep` inline harness.
+
+### Reproducing / Tuning the Search Space
+
+Search ranges are defined in `scripts/reward_sweep.py` and the `/api/sweep` handler. Adjust bounds cautiously (e.g. wide negative penalties can destabilize early learning). For large experiments, consider enabling an Optuna RDB storage (SQLite / Postgres) via `--storage` in the script.
+
+### Integrating the Best Config
+
+1. Run sweep.
+2. Inspect `best_reward_config.json`.
+3. POST fields into `/api/reward-config` (or modify the defaults in `reward_config.py` for a new baseline).
+4. Restart training and validate improvement (track average reward & lines).
+
+### Headless Mode for Faster Sweeps
+
+Set `HEADLESS=1` to bypass dashboard broadcasts during sweeps:
+
+```bash
+HEADLESS=1 python scripts/reward_sweep.py --trials 80 --device cuda
+```
+
+### Notes
+
+- The sweep harness uses a simplified single-env loop for relative ranking; absolute numbers may differ from multi-env dashboard runs.
+- Replay buffer is not persisted across trials (intentional for fairness and speed).
+- Pruning (MedianPruner) skips underperforming configs early—reduce `--pruner-startup-trials` if you want more aggressive pruning.
+
+
 ## Web Dashboard
 
 Start the web server:
