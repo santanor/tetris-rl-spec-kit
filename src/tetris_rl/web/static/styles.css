@@ -1,0 +1,35 @@
+body { font-family: system-ui, Arial, sans-serif; margin: 0; background:#111; color:#eee; }
+header { display:flex; gap:1rem; align-items:center; padding:0.75rem 1rem; background:#222; border-bottom:1px solid #333; }
+button { background:#0d6efd; border:none; color:#fff; padding:0.5rem 0.9rem; cursor:pointer; border-radius:4px; }
+button:hover { background:#0b5ed7; }
+main { display:grid; grid-template-columns: 260px 260px 1fr; gap:1rem; padding:1rem; }
+.board-section pre { background:#000; padding:0.5rem; font-family: 'Courier New', monospace; font-size:14px; line-height:14px; }
+.grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:0.4rem 0.8rem; font-size:0.85rem; }
+.label { color:#aaa; }
+.stats-section, .board-section, .chart-section { background:#1b1b1b; padding:0.75rem 0.9rem; border:1px solid #2a2a2a; border-radius:6px; }
+h1,h2,h3 { margin:0 0 0.5rem 0; font-weight:600; }
+ul#episodeRewards { list-style:none; margin:0; padding-left:0; max-height:140px; overflow:auto; font-size:0.8rem; }
+ul#episodeRewards li { padding:2px 4px; border-bottom:1px solid #222; }
+
+/* Color board */
+.color-board { display:grid; grid-template-columns: repeat(10, 18px); grid-auto-rows:18px; gap:2px; margin-top:0.5rem; background:#000; padding:4px; border:1px solid #222; width:max-content; }
+.cell { width:18px; height:18px; box-sizing:border-box; background:#111; border-radius:3px; position:relative; }
+.cell.filled { box-shadow: inset 0 0 4px rgba(0,0,0,0.6), 0 0 4px rgba(255,255,255,0.15); }
+.cell.filled::after { content:""; position:absolute; inset:2px; border-top:2px solid rgba(255,255,255,0.35); border-left:2px solid rgba(255,255,255,0.12); border-right:2px solid rgba(0,0,0,0.3); border-bottom:2px solid rgba(0,0,0,0.5); border-radius:2px; }
+.cell.active { outline:2px solid #fff; outline-offset:-2px; }
+.color-board .ghost { opacity:0.25; }
+
+/* Reward config form */
+.config-section { background:#1b1b1b; padding:0.75rem 0.9rem; border:1px solid #2a2a2a; border-radius:6px; }
+.config-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:0.5rem 0.75rem; font-size:0.75rem; }
+.config-grid label { display:flex; flex-direction:column; gap:2px; font-weight:500; }
+.config-grid input { background:#111; color:#eee; border:1px solid #333; padding:0.25rem 0.3rem; border-radius:4px; font-size:0.75rem; }
+.config-grid input:focus { outline:1px solid #0d6efd; }
+.config-actions { margin-top:0.6rem; display:flex; gap:0.75rem; align-items:center; }
+.status { font-size:0.7rem; color:#0d6efd; }
+
+
+@media (max-width: 900px) {
+	main { grid-template-columns: 1fr; }
+	.chart-section { order:3; }
+}

@@ -1,0 +1,10 @@
+name: placeholder-ci
+on: [push]
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Display message
+        run: echo "CI placeholder - real workflows to be added later"

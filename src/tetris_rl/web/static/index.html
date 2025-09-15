@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Tetris RL Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Tetris RL Dashboard</h1>
+    <button id="startBtn">Start Training</button>
+    <label>Episodes <input id="episodesInput" type="number" value="5" min="1" max="200"/></label>
+  </header>
+  <main>
+    <section class="board-section">
+      <h2>Board</h2>
+      <pre id="board"></pre>
+      <div id="colorBoard" class="color-board" aria-label="Color Board" role="img"></div>
+    </section>
+    <section class="stats-section">
+      <h2>Live Stats</h2>
+      <div class="grid">
+        <div><span class="label">Episode:</span> <span id="statEpisode">-</span></div>
+        <div><span class="label">Global Step:</span> <span id="statGlobalStep">-</span></div>
+        <div><span class="label">Reward:</span> <span id="statReward">-</span></div>
+        <div><span class="label">Loss:</span> <span id="statLoss">-</span></div>
+        <div><span class="label">Lines Total:</span> <span id="statLines">-</span></div>
+        <div><span class="label">Lines Δ:</span> <span id="statLinesDelta">-</span></div>
+      </div>
+      <h3>Episode Rewards</h3>
+      <ul id="episodeRewards"></ul>
+      <hr style="border:0;border-top:1px solid #2a2a2a;margin:0.75rem 0 0.5rem;" />
+      <h3>Reward Config</h3>
+      <form id="rewardConfigForm">
+        <div class="config-grid">
+          <label>Line 1 <input name="line_reward_1" type="number" step="0.01"/></label>
+          <label>Line 2 <input name="line_reward_2" type="number" step="0.01"/></label>
+          <label>Line 3 <input name="line_reward_3" type="number" step="0.01"/></label>
+          <label>Line 4 <input name="line_reward_4" type="number" step="0.01"/></label>
+          <label>Step Penalty <input name="step_penalty" type="number" step="0.001"/></label>
+          <label>Survival Bonus <input name="survival_bonus" type="number" step="0.001"/></label>
+          <label>Holes Wt <input name="holes_weight" type="number" step="0.001"/></label>
+          <label>Abs Holes Wt <input name="holes_abs_weight" type="number" step="0.001"/></label>
+          <label>Weighted Holes Δ Wt <input name="weighted_holes_weight" type="number" step="0.001"/></label>
+          <label>Weighted Holes Abs Wt <input name="weighted_holes_abs_weight" type="number" step="0.001"/></label>
+          <label>Holes Depth Power <input name="holes_depth_power" type="number" step="0.1" min="0.5" max="4"/></label>
+          <label>Height Wt <input name="height_weight" type="number" step="0.001"/></label>
+          <label>Bump Wt <input name="bumpiness_weight" type="number" step="0.001"/></label>
+          <label>Top-Out Penalty <input name="top_out_penalty" type="number" step="0.1"/></label>
+          <label>Row Density Δ Wt <input name="row_density_delta_weight" type="number" step="0.01"/></label>
+          <label>Row Density Abs Wt <input name="row_density_abs_weight" type="number" step="0.01"/></label>
+          <label>Row Density Clear Scale <input name="row_density_line_clear_scale" type="number" step="0.1" min="0"/></label>
+        </div>
+        <div class="config-actions">
+          <button type="submit">Apply</button>
+          <span id="configStatus" class="status"></span>
+        </div>
+      </form>
+      <small>Changes apply to subsequent environment steps; existing episode uses updated weights immediately.</small>
+      <hr style="border:0;border-top:1px solid #2a2a2a;margin:0.75rem 0 0.5rem;" />
+      <details open id="explorationPanel" style="margin-top:0.75rem;">
+        <summary style="cursor:pointer; font-weight:600;">Exploration (Epsilon / Strategy)</summary>
+        <form id="epsilonForm" class="epsilon-grid" style="margin-top:0.5rem;">
+        <label>Start ε <input name="epsilon_start" type="number" step="0.01" min="0" max="1" /></label>
+        <label>End ε <input name="epsilon_end" type="number" step="0.01" min="0" max="1" /></label>
+        <label>Decay Steps <input name="epsilon_decay" type="number" step="50" min="50" /></label>
+        <label>Schedule
+          <select name="epsilon_schedule">
+            <option value="exp">exp</option>
+            <option value="linear">linear</option>
+            <option value="cosine">cosine</option>
+            <option value="two_stage">two_stage</option>
+          </select>
+        </label>
+        <label>Mid ε <input name="epsilon_mid" type="number" step="0.01" min="0" max="1" /></label>
+        <label>Mid Step <input name="epsilon_mid_step" type="number" step="100" min="0" /></label>
+        <label>Strategy
+          <select name="exploration_strategy">
+            <option value="epsilon_greedy">epsilon_greedy</option>
+            <option value="boltzmann">boltzmann</option>
+          </select>
+        </label>
+        <label>Temp Start <input name="temperature_start" type="number" step="0.01" min="0.01" /></label>
+        <label>Temp End <input name="temperature_end" type="number" step="0.01" min="0.001" /></label>
+        <label>Temp Decay <input name="temperature_decay" type="number" step="100" min="1" /></label>
+          <div class="config-actions"><button type="submit">Apply</button><span id="epsilonStatus" class="status"></span></div>
+        </form>
+        <div id="explorationRuntime" style="margin-top:0.5rem;font-size:0.75rem;color:#aaa;">
+        <strong>Current:</strong> ε <span id="liveEpsilon">-</span>
+        <span id="liveTemperatureWrap" style="display:none;"> | τ <span id="liveTemperature">-</span></span>
+        <span> | random% <span id="liveRandomPct">-</span> | greedy% <span id="liveGreedyPct">-</span> | boltz% <span id="liveBoltzPct">-</span></span>
+        </div>
+      </details>
+    </section>
+    <section class="chart-section">
+      <h2>Reward Timeline</h2>
+      <canvas id="rewardChart" width="400" height="180"></canvas>
+      <h3 style="margin-top:1rem;">Episode Line Clears</h3>
+      <canvas id="lineClearsChart" width="400" height="160"></canvas>
+      <hr style="border:0;border-top:1px solid #2a2a2a;margin:1rem 0 0.75rem;" />
+      <section id="resumeSection">
+        <h3>Resume Training</h3>
+        <form id="resumeForm" class="resume-grid" style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:flex-end;">
+          <label style="flex:1 1 180px;">Checkpoint
+            <input type="text" name="checkpoint" placeholder="checkpoint_latest.pt" style="width:100%;" />
+          </label>
+          <label style="flex:0 0 110px;">Episodes
+            <input type="number" name="episodes" value="5" min="1" style="width:100%;" />
+          </label>
+          <label style="flex:0 0 120px;">Device
+            <select name="device" style="width:100%;">
+              <option value="auto">auto</option>
+              <option value="cpu">cpu</option>
+              <option value="cuda">cuda</option>
+            </select>
+          </label>
+          <button type="submit" style="flex:0 0 auto;">Resume</button>
+          <span id="resumeStatus" class="status" style="min-width:140px;font-size:0.8rem;"></span>
+        </form>
+        <div id="resumeMeta" style="font-size:0.7rem;color:#888;margin-top:0.3rem;line-height:1.3;">
+          <em>Provide a checkpoint filename (relative to training_runs/dashboard) or full path.</em>
+        </div>
+      </section>
+      <hr style="border:0;border-top:1px solid #2a2a2a;margin:1rem 0 0.75rem;" />
+      <section id="modelConfigSection">
+        <h3>Model Architecture</h3>
+        <form id="modelConfigForm" class="model-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:0.5rem;align-items:end;">
+          <label style="grid-column:1 / -1;">Hidden Layers (comma)
+            <input type="text" name="hidden_layers" placeholder="256,256,256" />
+          </label>
+          <label>Dueling
+            <select name="dueling">
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </label>
+          <label>Layer Norm
+            <select name="use_layer_norm">
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </label>
+          <label>Dropout
+            <input type="number" name="dropout" step="0.05" min="0" max="0.9" />
+          </label>
+          <div style="grid-column:1 / -1;display:flex;gap:0.75rem;align-items:center;">
+            <button type="submit">Apply (next session)</button>
+            <span id="modelConfigStatus" class="status" style="font-size:0.75rem;"></span>
+          </div>
+          <small style="grid-column:1 / -1;color:#888;">Changes apply when a new training or resume session starts; current running session is unaffected.</small>
+        </form>
+      </section>
+    </section>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="/static/main.js"></script>
+</body>
+</html>

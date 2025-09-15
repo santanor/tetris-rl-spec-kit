@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TetrisRLMetricsExport",
+  "type": "object",
+  "required": ["session", "episodes", "frames_sample"],
+  "properties": {
+    "session": {
+      "type": "object",
+      "required": ["session_id", "mode", "seed", "config", "summary"],
+      "properties": {
+        "session_id": {"type": "string"},
+        "mode": {"type": "string", "enum": ["train", "eval"]},
+        "seed": {"type": "integer"},
+        "config": {"type": "object"},
+        "summary": {
+          "type": "object",
+          "required": ["episodes_total", "avg_reward", "avg_lines_cleared"],
+            "properties": {
+              "episodes_total": {"type": "integer", "minimum": 0},
+              "avg_reward": {"type": "number"},
+              "avg_lines_cleared": {"type": "number"},
+              "warnings": {"type": "array", "items": {"type": "string"}}
+            }
+        }
+      }
+    },
+    "episodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "total_reward", "lines_cleared", "steps"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "total_reward": {"type": "number"},
+          "lines_cleared": {"type": "integer", "minimum": 0},
+          "steps": {"type": "integer", "minimum": 0},
+          "terminated": {"type": "boolean"},
+          "truncated": {"type": "boolean"},
+          "interrupted": {"type": "boolean"},
+          "max_height": {"type": "integer", "minimum": 0},
+          "holes_final": {"type": "integer", "minimum": 0},
+          "notable_flags": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "frames_sample": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["episode_index", "step_index", "reward", "action"],
+        "properties": {
+          "episode_index": {"type": "integer", "minimum": 0},
+          "step_index": {"type": "integer", "minimum": 0},
+          "reward": {"type": "number"},
+          "action": {"type": "integer"},
+          "action_label": {"type": "string"},
+          "holes": {"type": "integer", "minimum": 0},
+          "max_height": {"type": "integer", "minimum": 0},
+          "lines_cleared_delta": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}
