@@ -251,6 +251,34 @@ ws.onmessage = (event)=>{
     statLoss.textContent = (msg.loss||0).toFixed(4);
     // Determine best env board
     if(msg.best_board){ updateBoard(msg.best_board); }
+    // Heights visualization
+    if(Array.isArray(msg.heights)){
+      const hb = document.getElementById('heightsBar');
+      if(hb){
+        hb.innerHTML='';
+        const maxH = Math.max(1, ...msg.heights);
+        msg.heights.forEach((h,i)=>{
+          const bar = document.createElement('div');
+          bar.style.flex='1';
+            bar.style.background='#0d6efd';
+          bar.style.height = ((h / maxH) * 100).toFixed(1) + '%';
+          bar.style.position='relative';
+          bar.style.borderRadius='2px 2px 0 0';
+          bar.title = `col ${i}: ${h}`;
+          // label
+          const lab = document.createElement('span');
+          lab.textContent = h;
+          lab.style.position='absolute';
+          lab.style.bottom='-1.1rem';
+          lab.style.left='50%';
+          lab.style.transform='translateX(-50%)';
+          lab.style.fontSize='0.55rem';
+          lab.style.color='#888';
+          bar.appendChild(lab);
+          hb.appendChild(bar);
+        });
+      }
+    }
     // Update scoreboard
     if(Array.isArray(msg.envs) && envScoreboard){
       // Sort by episode_reward descending

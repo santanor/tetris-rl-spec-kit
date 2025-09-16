@@ -48,82 +48,37 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
         return obs, {}
 
     def step(self, action: int):  # type: ignore[override]
-        # Capture pre-step structural metrics
-        prev_holes = self.board.holes()
-        prev_weighted_holes = self.board.weighted_holes(getattr(self.reward_config, 'holes_depth_power', 1.0))
-        prev_height = self.board.aggregate_height()
-        # Average row density (exclude fully empty rows) before step
-        grid = self.board.grid
-        width = len(grid[0]) if grid else 0
-        def _avg_density(g):
-            total = 0.0
-            count = 0
-            for row in g:
-                filled = sum(1 for c in row if c)
-                if filled == 0:
-                    continue
-                total += filled / width if width else 0.0
-                count += 1
-            return (total / count) if count else 0.0
-        prev_density = _avg_density(grid)
-        prev_bump = self.board.bumpiness()
-
+        # Minimal reward computation: line clears + column imbalance penalty.
         self._step_count += 1
         lines_delta, top_out, locked = self.board.step(int(action))
 
-        # Base line clear reward (weighted) + step penalty
         cfg = self.reward_config
-        if lines_delta:
-            base = cfg.line_table().get(lines_delta, float(lines_delta))
-        else:
-            base = 0.0
+        base = cfg.line_table().get(lines_delta, 0.0) if lines_delta else 0.0
         step_penalty = cfg.step_penalty
 
-        # Post-step metrics
-        holes_after = self.board.holes()
-        weighted_holes_after = self.board.weighted_holes(getattr(cfg, 'holes_depth_power', 1.0))
-        height_after = self.board.aggregate_height()
-        bump_after = self.board.bumpiness()
-        density_after = _avg_density(self.board.grid)
-
-        # Deltas
-        holes_delta = holes_after - prev_holes
-        weighted_holes_delta = weighted_holes_after - prev_weighted_holes
-        height_delta = height_after - prev_height
-        bump_delta = bump_after - prev_bump
-        density_delta = density_after - prev_density
-
-        # Structural shaping
-        structural_holes = cfg.holes_weight * holes_delta
-        weighted_structural = 0.0
-        if getattr(cfg, 'weighted_holes_weight', 0.0) != 0.0:
-            weighted_structural = cfg.weighted_holes_weight * weighted_holes_delta
-        if cfg.conditional_height and (prev_height < cfg.height_threshold) and (height_after < cfg.height_threshold):
-            structural_height = 0.0
+        heights = self.board.heights()  # list length = board width (10)
+        imbalance_excesses = []
+        if len(heights) > 1:
+            for i, h in enumerate(heights):
+                others = heights[:i] + heights[i+1:]
+                avg_others = sum(others) / len(others) if others else 0.0
+                excess = max(0.0, h - avg_others)
+                imbalance_excesses.append(excess)
         else:
-            structural_height = cfg.height_weight * height_delta
-        structural_bump = cfg.bumpiness_weight * bump_delta
-        density_structural = 0.0
-        if getattr(cfg, 'row_density_delta_weight', 0.0) != 0.0:
-            density_structural = cfg.row_density_delta_weight * density_delta
-            if lines_delta:  # amplify on successful clears (compact play leading to clears)
-                scale = getattr(cfg, 'row_density_line_clear_scale', 1.0)
-                density_structural *= scale
-        structural = structural_holes + structural_height + structural_bump + weighted_structural + density_structural
+            imbalance_excesses = [0.0]
 
-        # Absolute penalties
-        abs_holes_penalty = cfg.holes_abs_weight * holes_after if hasattr(cfg, 'holes_abs_weight') else 0.0
-        abs_weighted_penalty = 0.0
-        if hasattr(cfg, 'weighted_holes_abs_weight') and cfg.weighted_holes_abs_weight != 0.0:
-            abs_weighted_penalty = cfg.weighted_holes_abs_weight * weighted_holes_after
+        if cfg.imbalance_mode == 'max':
+            imbalance_metric = max(imbalance_excesses)
+        else:  # sum mode by default
+            imbalance_metric = sum(imbalance_excesses)
 
-        # Survival bonus
-        survival_bonus = cfg.survival_bonus if not top_out else 0.0
+        # Apply power then scale
+        if cfg.imbalance_penalty_power != 1.0:
+            imbalance_penalty_value = (imbalance_metric ** cfg.imbalance_penalty_power) * cfg.imbalance_penalty_scale
+        else:
+            imbalance_penalty_value = imbalance_metric * cfg.imbalance_penalty_scale
 
-        abs_density_shaping = 0.0
-        if getattr(cfg, 'row_density_abs_weight', 0.0) != 0.0:
-            abs_density_shaping = cfg.row_density_abs_weight * density_after
-        reward = base + step_penalty + structural + survival_bonus + abs_holes_penalty + abs_weighted_penalty + abs_density_shaping
+        reward = base + step_penalty - imbalance_penalty_value
         if top_out:
             reward += cfg.top_out_penalty
 
@@ -134,33 +89,17 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
             "lines_delta": lines_delta,
             "locked": locked,
             "lines_cleared_total": self.board.lines_cleared_total,
+            "heights": heights,
+            "imbalance_excesses": imbalance_excesses,
+            "imbalance_metric": imbalance_metric,
             "reward_components": {
                 "base_line": base,
                 "step_penalty": step_penalty,
-                "structural": structural,
-                "abs_holes": abs_holes_penalty,
-                "abs_weighted_holes": abs_weighted_penalty,
-                "survival": survival_bonus,
+                "imbalance_penalty": -imbalance_penalty_value,
                 "top_out": cfg.top_out_penalty if top_out else 0.0,
-                "structural_breakdown": {
-                    "holes": structural_holes,
-                    "height": structural_height,
-                    "bumpiness": structural_bump,
-                    "weighted_holes_delta": weighted_structural,
-                    "weighted_holes_abs": abs_weighted_penalty,
-                    "abs_holes_penalty": abs_holes_penalty,
-                    "density_delta": density_structural,
-                    "density_abs": abs_density_shaping,
-                },
+                "total": reward,
                 "config_hash": hash(tuple(sorted(cfg.to_dict().items()))),
             },
-            "holes_delta": holes_delta,
-            "height_delta": height_delta,
-            "bump_delta": bump_delta,
-            "weighted_holes_delta": weighted_holes_delta,
-            "weighted_holes_after": weighted_holes_after,
-            "density_delta": density_delta,
-            "density_after": density_after,
         }
         return obs, reward, terminated, truncated, info
 

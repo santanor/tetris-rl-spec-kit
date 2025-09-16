@@ -75,9 +75,9 @@ curl -X POST 'http://127.0.0.1:8000/api/sweep?trials=40&episodes_stage1=40&episo
 ```
 
 Progress & completion events are broadcast over the WebSocket as:
-
+## Reward Sweep (Minimal Reward Space)
 ```json
-{ "type": "sweep_progress", "trial": 12, "score": 0.73 }
+The reward system has been simplified to focus on clarity and a small, interpretable parameter set:
 { "type": "sweep_complete", "best": { ... } }
 ```
 
@@ -88,6 +88,7 @@ Artifacts are saved under `sweep_artifacts/sweep_results.json` and include both 
 Current objective = mean_episode_reward (Stage 1) + re-evaluated mean (Stage 2). You can adjust weighting between reward and lines cleared inside `scripts/reward_sweep.py` (see `objective_value` aggregation) or the `/api/sweep` inline harness.
 
 ### Reproducing / Tuning the Search Space
+Column imbalance penalty:
 
 Search ranges are defined in `scripts/reward_sweep.py` and the `/api/sweep` handler. Adjust bounds cautiously (e.g. wide negative penalties can destabilize early learning). For large experiments, consider enabling an Optuna RDB storage (SQLite / Postgres) via `--storage` in the script.
 
@@ -439,7 +440,7 @@ Solution: Combine:
 - `holes_weight` (delta-based: punishes creation, rewards removal)
 - `holes_abs_weight` (persistent pressure: every existing hole costs each step)
 
-Tuning suggestions:
+Objective = mean episode reward (Stage 1) with re-evaluation of top-K under longer horizons (Stage 2). With the simplified reward, reward magnitude correlates more directly with line-clear efficiency and balanced stacking.
 
 - Start with a small magnitude (e.g. -0.02 * holes). If agent still stacks above cavities without clearing, increase gradually (up to -0.05).
 - If agent becomes overly conservative (avoids risk leading to low line clears), reduce absolute penalty and rely more on delta shaping plus stronger line rewards.
@@ -500,9 +501,9 @@ Tuning Guidelines:
 - Start with only the delta term (keep `row_density_abs_weight = 0`) to avoid constant reward inflation; absolute term can be introduced later (e.g. 0.05–0.1) if the agent oscillates between compact and sparse states.
 - If density shaping dominates reward (agent fixates on micro-filling without clearing lines), reduce `row_density_delta_weight` or increase line clear rewards.
 - Combine with moderate holes penalties; overlapping signals can otherwise double-penalize the same structural flaw (a gap often contributes to both lower density and a hole if covered above).
-
+### Minimal Reward Philosophy
 Observability:
-
+All legacy shaping (holes, bumpiness, density, survival bonuses, depth-weighted penalties) was removed to reduce implicit biases and make tuning transparent. If you want to re-introduce shaping, consider starting with potential-based terms to preserve optimal policy invariance.
 WebSocket `step` info includes `density_delta` and `density_after`. The structural breakdown adds:
 
 ```jsonc
@@ -533,22 +534,19 @@ Artifacts written to a run directory (e.g. `runs/exp1`):
 |------|-------------|
 | `policy_net.pt` | Final policy network weights only (for inference/deployment). |
 | `checkpoint_latest.pt` | Symlink (or copy fallback) pointing to the newest full checkpoint. |
-| `checkpoint_00005.pt`, `checkpoint_00010.pt`, ... | Periodic full checkpoints (model, optimizer, replay buffer, RNG state, session stats). |
+`reward_components` now contains only the minimal breakdown:
 | `episodes.jsonl` | One JSON per episode summary (append-only; safe for streaming analysis). |
 | `training_summary.txt` | Final aggregate reward / lines summary. |
-
-Checkpoint contents include:
-
-- Policy + target network state dicts
-- Optimizer state dict
-- Replay buffer (transitions list + pointer)
-- Full `Session` object (including completed `Episode` objects)
-- Global step counter
-- Python, Torch (CPU & CUDA) RNG states (best-effort restore)
-- Original training config fields
-
-#### Enabling Periodic Checkpoints
-
+{
+  "reward_components": {
+    "base_line": 3.0,
+    "step_penalty": 0.0,
+    "imbalance_penalty": -0.42,
+    "top_out": 0.0,
+    "total": 2.58
+  },
+  "heights": [5,6,6,9,11,4,3,2,2,1]
+}
 Configure via `TrainingConfig`:
 
 ```python
@@ -595,14 +593,11 @@ You can also switch GPUs/CPUs; checkpoint tensors are loaded to CPU first then m
 {"index":12,"total_reward":4.75,"lines_cleared":2,"steps":498,"terminated":true,"truncated":false,"interrupted":false,"max_height":11,"holes_final":3,"notable_flags":[]}
 ```
 
-Tail the file in real time:
-
+*(Legacy hole / bumpiness shaping removed — see previous revision if you need those details.)*
 ```bash
-tail -f runs/exp1/episodes.jsonl
-```
+*(Depth-weighted hole penalties removed.)*
 
-#### Best Practices
-
+*(Row density shaping removed to keep reward surface simple.)*
 - Keep `replay_capacity` constant across resumes to avoid distribution shift; resizing is not currently supported.
 - If you change reward shaping drastically mid-run, consider starting a fresh directory unless you explicitly want mixed-policy replay.
 - For evaluation-only usage, load `policy_net.pt`; you do not need full checkpoints.

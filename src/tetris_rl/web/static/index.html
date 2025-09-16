@@ -45,20 +45,17 @@
           <label>Line 1 <input name="line_reward_1" type="number" step="0.01"/></label>
           <label>Line 2 <input name="line_reward_2" type="number" step="0.01"/></label>
           <label>Line 3 <input name="line_reward_3" type="number" step="0.01"/></label>
-          <label>Line 4 <input name="line_reward_4" type="number" step="0.01"/></label>
+            <label>Line 4 <input name="line_reward_4" type="number" step="0.01"/></label>
           <label>Step Penalty <input name="step_penalty" type="number" step="0.001"/></label>
-          <label>Survival Bonus <input name="survival_bonus" type="number" step="0.001"/></label>
-          <label>Holes Wt <input name="holes_weight" type="number" step="0.001"/></label>
-          <label>Abs Holes Wt <input name="holes_abs_weight" type="number" step="0.001"/></label>
-          <label>Weighted Holes Δ Wt <input name="weighted_holes_weight" type="number" step="0.001"/></label>
-          <label>Weighted Holes Abs Wt <input name="weighted_holes_abs_weight" type="number" step="0.001"/></label>
-          <label>Holes Depth Power <input name="holes_depth_power" type="number" step="0.1" min="0.5" max="4"/></label>
-          <label>Height Wt <input name="height_weight" type="number" step="0.001"/></label>
-          <label>Bump Wt <input name="bumpiness_weight" type="number" step="0.001"/></label>
+          <label>Imbalance Scale <input name="imbalance_penalty_scale" type="number" step="0.001"/></label>
+          <label>Imbalance Power <input name="imbalance_penalty_power" type="number" step="0.01" min="1"/></label>
+          <label>Imbalance Mode
+            <select name="imbalance_mode">
+              <option value="sum">sum</option>
+              <option value="max">max</option>
+            </select>
+          </label>
           <label>Top-Out Penalty <input name="top_out_penalty" type="number" step="0.1"/></label>
-          <label>Row Density Δ Wt <input name="row_density_delta_weight" type="number" step="0.01"/></label>
-          <label>Row Density Abs Wt <input name="row_density_abs_weight" type="number" step="0.01"/></label>
-          <label>Row Density Clear Scale <input name="row_density_line_clear_scale" type="number" step="0.1" min="0"/></label>
         </div>
         <div class="config-actions">
           <button type="submit">Apply</button>
@@ -66,6 +63,11 @@
         </div>
       </form>
       <small>Changes apply to subsequent environment steps; existing episode uses updated weights immediately.</small>
+      <div style="margin-top:0.75rem;">
+        <h3 style="margin:0 0 0.25rem;">Column Heights</h3>
+        <div id="heightsBar" style="display:flex;gap:4px;align-items:flex-end;height:120px;border:1px solid #222;padding:4px;border-radius:4px;background:#111;"></div>
+        <div style="font-size:0.65rem;color:#888;margin-top:0.25rem;" id="imbalanceInfo"></div>
+      </div>
       <hr style="border:0;border-top:1px solid #2a2a2a;margin:0.75rem 0 0.5rem;" />
       <details open id="explorationPanel" style="margin-top:0.75rem;">
         <summary style="cursor:pointer; font-weight:600;">Exploration (Epsilon / Strategy)</summary>

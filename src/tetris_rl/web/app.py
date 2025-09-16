@@ -273,8 +273,7 @@ async def training_loop(
     episode_objs: list[Episode] = []
     episode_rewards_current = [0.0]*num_envs
     episode_lineclears_current = [0]*num_envs
-    structural_sum_list = [{"holes":0.0, "height":0.0, "bumpiness":0.0} for _ in range(num_envs)]
-    structural_steps_list = [0]*num_envs
+    # No longer tracking detailed structural shaping metrics after reward simplification.
     action_counts_list = [{"random":0, "greedy":0, "boltzmann":0} for _ in range(num_envs)]
     last_eps_list: list[Optional[float]] = [None]*num_envs
     last_temp_list: list[Optional[float]] = [None]*num_envs
@@ -356,11 +355,7 @@ async def training_loop(
             if info.get("lines_delta"):
                 episode_lineclears_current[i] += info.get("lines_delta",0)
             # Structural accumulation for averages
-            rc = info.get("reward_components") or {}
-            sb = rc.get("structural_breakdown") or {}
-            for k in structural_sum_list[i]:
-                structural_sum_list[i][k] += float(sb.get(k,0.0))
-            structural_steps_list[i] += 1
+            # Nothing to accumulate structurally now; could collect imbalance metrics per step if desired.
             # Exploration meta
             m = metas[i]
             src = m.get("action_source")
@@ -374,7 +369,7 @@ async def training_loop(
                 session_reward += episode_objs[i].total_reward
                 episodes_done[i] += 1
                 # Broadcast episode end for this env
-                avg_struct = {k: (v/structural_steps_list[i] if structural_steps_list[i] else 0.0) for k,v in structural_sum_list[i].items()}
+                avg_struct = {}
                 total_actions = sum(action_counts_list[i].values()) or 1
                 action_dist = {k: v/total_actions for k,v in action_counts_list[i].items()}
                 await broadcast({
@@ -409,8 +404,7 @@ async def training_loop(
                     episode_objs[i] = Episode(index=episodes_done[i])
                     episode_rewards_current[i] = 0.0
                     episode_lineclears_current[i] = 0
-                    structural_sum_list[i] = {"holes":0.0, "height":0.0, "bumpiness":0.0}
-                    structural_steps_list[i] = 0
+                    # reset placeholders
                     action_counts_list[i] = {"random":0, "greedy":0, "boltzmann":0}
                 else:
                     active_mask[i] = False
@@ -474,6 +468,7 @@ async def training_loop(
                 "best_env": best_idx,
                 "best_board": current_board.snapshot() if current_board else None,
                 "envs": envs_payload,
+                "heights": current_board.heights() if current_board else [],
             })
             if profiler and t_broadcast_start is not None:
                 profiler.record("broadcast", asyncio.get_event_loop().time() - t_broadcast_start)
@@ -635,26 +630,15 @@ async def start_reward_sweep(trials: int = 30, episodes_stage1: int = 40, episod
 
         def suggest(trial: optuna.Trial) -> RewardConfig:
             rc = RewardConfig()
-            rc.line_reward_1 = trial.suggest_float("line_reward_1", 0.05, 0.4)
-            rc.line_reward_2 = trial.suggest_float("line_reward_2", 0.1, 0.8)
-            rc.line_reward_3 = trial.suggest_float("line_reward_3", 0.2, 1.4)
-            rc.line_reward_4 = trial.suggest_float("line_reward_4", 0.5, 3.0)
-            rc.survival_bonus = trial.suggest_float("survival_bonus", 0.0, 0.02)
-            rc.step_penalty = trial.suggest_float("step_penalty", -0.015, 0.0)
-            rc.top_out_penalty = trial.suggest_float("top_out_penalty", -5.0, -0.5)
-            for name, low, high in [
-                ("holes_weight", 1e-4, 5e-2),
-                ("holes_abs_weight", 1e-4, 5e-2),
-                ("weighted_holes_weight", 1e-4, 5e-2),
-                ("weighted_holes_abs_weight", 1e-4, 5e-2),
-                ("height_weight", 1e-4, 1e-2),
-                ("bumpiness_weight", 1e-4, 1e-2),
-                ("row_density_delta_weight", 1e-4, 5e-2),
-                ("row_density_abs_weight", 1e-4, 5e-2),
-            ]:
-                setattr(rc, name, trial.suggest_float(name, low, high, log=True))
-            rc.row_density_line_clear_scale = trial.suggest_float("row_density_line_clear_scale", 0.0, 3.0)
-            rc.holes_depth_power = trial.suggest_float("holes_depth_power", 0.8, 3.2)
+            rc.line_reward_1 = trial.suggest_float("line_reward_1", 0.2, 2.0)
+            rc.line_reward_2 = trial.suggest_float("line_reward_2", 0.5, 4.0)
+            rc.line_reward_3 = trial.suggest_float("line_reward_3", 1.0, 6.0)
+            rc.line_reward_4 = trial.suggest_float("line_reward_4", 2.0, 10.0)
+            rc.step_penalty = trial.suggest_float("step_penalty", -0.02, 0.0)
+            rc.imbalance_penalty_scale = trial.suggest_float("imbalance_penalty_scale", 0.0, 0.2)
+            rc.imbalance_penalty_power = trial.suggest_float("imbalance_penalty_power", 1.0, 2.5)
+            rc.top_out_penalty = trial.suggest_float("top_out_penalty", -15.0, -2.0)
+            rc.imbalance_mode = trial.suggest_categorical("imbalance_mode", ["sum", "max"])
             return rc
 
         pruner = optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=1)
@@ -719,7 +703,8 @@ async def start_reward_sweep(trials: int = 30, episodes_stage1: int = 40, episod
         for t in finalists:
             rc = RewardConfig()
             for k,v in t.params.items():
-                if hasattr(rc,k): setattr(rc,k,v)
+                if hasattr(rc,k):
+                    setattr(rc,k,v)
             seeds2 = [12000+i for i in range(seeds_stage2)]
             vals = [eval_once(rc, episodes_stage2, s) for s in seeds2]
             stage2.append({"trial": t.number, "stage1": t.value, "stage2_mean": sum(vals)/len(vals), "params": t.params})
@@ -744,11 +729,19 @@ async def update_reward_config(payload: Dict[str, Any]):
         if not hasattr(reward_config, k):
             errors[k] = "unknown"
             continue
-        try:
-            setattr(reward_config, k, float(v))
-            updated += 1
-        except (TypeError, ValueError):
-            errors[k] = "not-a-float"
+        current = getattr(reward_config, k)
+        if isinstance(current, float):
+            try:
+                setattr(reward_config, k, float(v))
+                updated += 1
+            except (TypeError, ValueError):
+                errors[k] = "not-a-float"
+        else:
+            if isinstance(v, str):
+                setattr(reward_config, k, v)
+                updated += 1
+            else:
+                errors[k] = "invalid-type"
     # Broadcast new config to all clients
     await broadcast({"type": "config_update", "config": reward_config.to_dict()})
     return {"updated": updated, "errors": errors, "config": reward_config.to_dict()}
