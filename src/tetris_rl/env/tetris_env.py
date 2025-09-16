@@ -57,6 +57,24 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
         step_penalty = cfg.step_penalty
 
         heights = self.board.heights()  # list length = board width (10)
+        # Compute which columns contain at least one 'hole': an empty cell underneath
+        # any filled cell in that column. We'll scan from top to bottom once.
+        hole_columns = 0
+        grid = self.board.grid
+        width = len(grid[0]) if grid else 0
+        height_dim = len(grid)
+        for x in range(width):
+            seen_block = False
+            col_has_hole = False
+            for y in range(height_dim):
+                if grid[y][x]:
+                    seen_block = True
+                else:
+                    if seen_block:  # empty below a previously seen block => hole
+                        col_has_hole = True
+                        break
+            if col_has_hole:
+                hole_columns += 1
         imbalance_excesses = []
         if len(heights) > 1:
             for i, h in enumerate(heights):
@@ -78,7 +96,10 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
         else:
             imbalance_penalty_value = imbalance_metric * cfg.imbalance_penalty_scale
 
-        reward = base + step_penalty - imbalance_penalty_value
+        # Hole column penalty (each column with at least one hole)
+        hole_col_penalty_value = hole_columns * getattr(cfg, 'hole_column_penalty', 0.0)
+
+        reward = base + step_penalty - imbalance_penalty_value + (-hole_col_penalty_value)
         if top_out:
             reward += cfg.top_out_penalty
 
@@ -92,10 +113,12 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
             "heights": heights,
             "imbalance_excesses": imbalance_excesses,
             "imbalance_metric": imbalance_metric,
+            "hole_columns": hole_columns,
             "reward_components": {
                 "base_line": base,
                 "step_penalty": step_penalty,
                 "imbalance_penalty": -imbalance_penalty_value,
+                "hole_column_penalty": -hole_col_penalty_value,
                 "top_out": cfg.top_out_penalty if top_out else 0.0,
                 "total": reward,
                 "config_hash": hash(tuple(sorted(cfg.to_dict().items()))),

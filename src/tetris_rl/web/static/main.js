@@ -254,18 +254,21 @@ ws.onmessage = (event)=>{
     // Heights visualization
     if(Array.isArray(msg.heights)){
       const hb = document.getElementById('heightsBar');
+      const infoBox = document.getElementById('imbalanceInfo');
       if(hb){
         hb.innerHTML='';
-        const maxH = Math.max(1, ...msg.heights);
-        msg.heights.forEach((h,i)=>{
+        const heightsArr = msg.heights;
+        const maxH = Math.max(1, ...heightsArr);
+        const tallest = Math.max(...heightsArr);
+        const tallestIdxs = heightsArr.map((h,i)=>h===tallest?i:null).filter(v=>v!==null);
+        heightsArr.forEach((h,i)=>{
           const bar = document.createElement('div');
           bar.style.flex='1';
-            bar.style.background='#0d6efd';
+          bar.style.background = tallestIdxs.includes(i)? '#f39c12' : '#0d6efd';
           bar.style.height = ((h / maxH) * 100).toFixed(1) + '%';
           bar.style.position='relative';
           bar.style.borderRadius='2px 2px 0 0';
           bar.title = `col ${i}: ${h}`;
-          // label
           const lab = document.createElement('span');
           lab.textContent = h;
           lab.style.position='absolute';
@@ -277,6 +280,14 @@ ws.onmessage = (event)=>{
           bar.appendChild(lab);
           hb.appendChild(bar);
         });
+        if(infoBox){
+          // We only have heights in the step message; penalty components come via
+          // reward components stored inside env step info (not directly broadcast per env step here).
+          // For now show tallest and columns count; server broadcasts hole column count within reward_components on env step info
+          const holeColPenalty = msg.reward_components && msg.reward_components.hole_column_penalty;
+          const holeCols = msg.hole_columns != null ? msg.hole_columns : '—';
+          infoBox.textContent = `Tallest: ${tallest} | Hole cols: ${holeCols}` + (holeColPenalty ? ` | Hole penalty: ${holeColPenalty.toFixed(3)}` : '');
+        }
       }
     }
     // Update scoreboard

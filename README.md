@@ -143,28 +143,64 @@ scripts/run_demo.py                  # Random policy session export demo
 
 ## Notes
 
-- The environment observation is a small feature vector: `[step, lines_cleared_total, holes, aggregate_height]`
-- Reward signal: lines cleared per step minus small step penalty (-0.01)
+- The environment observation is a small feature vector: `[step, lines_cleared_total, holes, aggregate_height]` (planned simplification may remove holes in a future revision)
+- Reward signal (current minimal scheme): line clear reward minus imbalance penalty (and optional step penalty), plus top-out penalty on termination.
 - Frontend rendering uses ASCII transformation of board state; active piece marked with `*`.
 - Colored board: dashboard also renders a color grid using standard Tetris piece palette.
 
-### Reward Shaping (Enhanced)
+### Minimal Reward Scheme
 
-The environment now applies additional shaping to accelerate learning:
+Legacy multi-term shaping (holes deltas, bumpiness deltas, density, survival bonus, etc.) was removed to keep the signal transparent. The current reward is the sum of:
 
-| Component | Description | Default Weight/Effect |
-|-----------|-------------|------------------------|
-| Line clear base | Non-linear: 1,3,5,8 for clearing 1–4 lines | Encourages multi-line clears |
-| Step penalty | Constant per action | -0.01 |
-| Survival bonus | Small reward each step survived | +0.002 |
-| Holes delta | Penalizes creation, rewards reduction | -0.20 per new hole (implicit sign handling) |
-| Height delta | Penalizes stack height growth | -0.005 per aggregate height increase |
-| Bumpiness delta | Penalizes uneven surface increases | -0.01 per bumpiness increase |
-| Top-out penalty | Applied when topping out | -2.0 |
+1. Line clear reward (non-linear table)  
+2. Minus column imbalance penalty  
+3. Minus per-column hole presence penalty  
+4. Plus (optionally) a per-step penalty (typically zero)  
+5. Plus top-out penalty when the episode terminates due to stacking to the spawn area (negative value)  
 
-Breakdowns are exposed in `info['reward_components']` for interpretability along with `holes_delta`, `height_delta`, and `bump_delta`.
+Imbalance penalty: For each column i we compare its height h_i to the average height of all other columns. Excess_i = max(0, h_i - avg_{-i}). We either sum or take the max of these excesses (mode configurable) and then apply:  
+penalty = scale * (metric ** power).  
+Higher power (>1) exaggerates large disparities. This discourages building a single spike while still allowing strategic wells when tuned appropriately.
 
-These weights are intentionally conservative; adjust as needed for stability. Potential-based shaping could be added later for policy invariance.
+Hole column penalty: We count how many columns contain at least one empty cell below a filled cell (a "hole"). Each such column incurs `hole_column_penalty`. This is a coarse, interpretable proxy discouraging scattered holes without micromanaging depth-weighted details.
+
+`info['reward_components']` exposes a per-step breakdown:
+
+```json
+{
+  "reward_components": {
+    "base_line": 3.0,
+    "step_penalty": 0.0,
+    "imbalance_penalty": -0.42,
+    "hole_column_penalty": -0.10,
+    "top_out": 0.0,
+    "total": 2.48
+  },
+  "heights": [5,6,6,9,11,4,3,2,2,1],
+  "hole_columns": 1,
+  "imbalance_metric": 8.4
+}
+```
+
+### Reward Parameters
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `line_reward_1` | float | 1.0 | Reward for clearing a single line. |
+| `line_reward_2` | float | 3.0 | Reward for a double line clear. |
+| `line_reward_3` | float | 5.0 | Reward for a triple line clear. |
+| `line_reward_4` | float | 8.0 | Reward for a Tetris (4 lines). |
+| `step_penalty` | float | 0.0 | Small negative per step (0.0 disables). |
+| `imbalance_penalty_scale` | float | 0.05 | Linear scale applied after computing imbalance metric (and power). |
+| `imbalance_penalty_power` | float | 1.0 | Power applied to imbalance metric before scaling; >1 amplifies large spikes. |
+| `imbalance_mode` | str (`sum`|`max`) | `sum` | Aggregation over per-column excesses. |
+| `hole_column_penalty` | float | 0.0 | Penalty per column that contains at least one hole (enable by setting >0). |
+| `top_out_penalty` | float | -10.0 | Applied once when topping out. |
+
+Tuning suggestions:
+- Start with `hole_column_penalty` =~ 0.05–0.15 if you see persistent early holes. Set back to 0.0 if policy becomes too conservative about creating wells.
+- Increase `imbalance_penalty_scale` only if you observe tall single-column spikes; raising `imbalance_penalty_power` to 1.2–1.5 can be more targeted than scaling directly.
+- Keep line reward ratios roughly increasing (1,3,5,8) to bias toward multi-line clears.
 
 ### Dynamic Reward Configuration (Live Tuning)
 
@@ -195,19 +231,7 @@ Dashboard UI:
 
 The web dashboard now includes a "Reward Config" panel with editable numeric fields. Press "Apply" to send a batch update. Values are immediately used by subsequent environment steps (the active episode picks up changes without restart since the environment reads the shared config each step).
 
-`reward_components` now also includes a `structural_breakdown` with per-term contributions:
-
-```json
-"reward_components": {
-  "base_line": 0,
-  "step_penalty": -0.01,
-  "structural": -0.034,
-  "survival": 0.002,
-  "top_out": 0,
-  "structural_breakdown": {
-     "holes": -0.02,
-     "height": -0.004,
-     "bumpiness": -0.01
+Legacy fields like `holes_weight`, `bumpiness_weight`, `survival_bonus`, etc. are no longer honored.
   },
   "config_hash": 123456789
 }

@@ -34,6 +34,11 @@ class RewardConfig:
     imbalance_penalty_power: float = 1.0   # >1 exaggerates large excesses
     imbalance_mode: str = "sum"            # 'sum' or 'max'
 
+    # Per-column hole presence penalty: for each column that contains at least one
+    # empty cell below a filled cell (i.e. has a 'hole'), apply this penalty.
+    # Set to 0.0 to disable.
+    hole_column_penalty: float = 0.0
+
     # Top-out penalty (episode termination)
     top_out_penalty: float = -10.0
 

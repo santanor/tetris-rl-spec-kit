@@ -278,6 +278,8 @@ async def training_loop(
     last_eps_list: list[Optional[float]] = [None]*num_envs
     last_temp_list: list[Optional[float]] = [None]*num_envs
     active_mask = [True]*num_envs
+    # store most recent env step info for each env to extract hole column stats for broadcast
+    env_last_info: list[Optional[dict]] = [None]*num_envs
 
     for i in range(num_envs):
         e = TetrisEnv(seed=rng.randint(0, 1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
@@ -349,6 +351,7 @@ async def training_loop(
                 continue
             action = actions[i]
             next_state, reward, done, truncated, info = env.step(action)
+            env_last_info[i] = info
             buffer.push(states[i], action, reward, next_state, (done or truncated))
             episode_objs[i].record_step(reward, info.get("lines_delta",0), int(next_state[3]), int(next_state[2]))
             episode_rewards_current[i] += reward
@@ -461,6 +464,9 @@ async def training_loop(
             t_broadcast_start = None
             if profiler:
                 t_broadcast_start = asyncio.get_event_loop().time()
+            # Gather hole column stats from best env if available
+            best_info = env_last_info[best_idx] or {}
+            rc_best = best_info.get("reward_components") or {}
             await broadcast({
                 "type": "step",
                 "global_step": global_step,
@@ -469,6 +475,8 @@ async def training_loop(
                 "best_board": current_board.snapshot() if current_board else None,
                 "envs": envs_payload,
                 "heights": current_board.heights() if current_board else [],
+                "hole_columns": best_info.get("hole_columns"),
+                "hole_column_penalty": rc_best.get("hole_column_penalty"),
             })
             if profiler and t_broadcast_start is not None:
                 profiler.record("broadcast", asyncio.get_event_loop().time() - t_broadcast_start)
