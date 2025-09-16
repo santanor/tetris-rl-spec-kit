@@ -29,91 +29,6 @@ Run a quick training demo (non-visual):
 python scripts/train_demo.py
 ```
 
-## Reward Shaping Bayesian Sweep (Optuna)
-
-You can run an automated Bayesian optimization sweep over reward shaping parameters to discover better weights.
-
-### Script-Based (Offline)
-
-Install dependencies (Optuna already listed in `pyproject.toml`):
-
-```bash
-pip install -e .
-python scripts/reward_sweep.py --trials 60 --episodes-stage1 40 --episodes-stage2 120 --seeds-stage2 2 --final-topk 5
-```
-
-Artifacts are written to `sweep_artifacts/`:
-
-| File | Description |
-|------|-------------|
-| `study_stage1.json` | Stage 1 trial results (pruned + complete) |
-| `stage2_results.json` | Re-evaluation of top-K with longer runs & more seeds |
-| `best_reward_config.json` | Concise best configuration summary |
-
-Example to load best config into the running dashboard session:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/reward-config \
-  -H 'Content-Type: application/json' \
-  -d @sweep_artifacts/best_reward_config.json
-```
-
-If the JSON structure differs (wrapped fields), extract the `params` object before posting.
-
-### API Endpoint (Background Sweep)
-
-Start the server:
-
-```bash
-python -m uvicorn tetris_rl.web.app:app --reload
-```
-
-Launch a sweep via the new endpoint:
-
-```bash
-curl -X POST 'http://127.0.0.1:8000/api/sweep?trials=40&episodes_stage1=40&episodes_stage2=120&topk=5'
-```
-
-Progress & completion events are broadcast over the WebSocket as:
-## Reward Sweep (Minimal Reward Space)
-```json
-The reward system has been simplified to focus on clarity and a small, interpretable parameter set:
-{ "type": "sweep_complete", "best": { ... } }
-```
-
-Artifacts are saved under `sweep_artifacts/sweep_results.json` and include both Stage 1 top-K and Stage 2 re-evaluations.
-
-### Objective Function
-
-Current objective = mean_episode_reward (Stage 1) + re-evaluated mean (Stage 2). You can adjust weighting between reward and lines cleared inside `scripts/reward_sweep.py` (see `objective_value` aggregation) or the `/api/sweep` inline harness.
-
-### Reproducing / Tuning the Search Space
-Column imbalance penalty:
-
-Search ranges are defined in `scripts/reward_sweep.py` and the `/api/sweep` handler. Adjust bounds cautiously (e.g. wide negative penalties can destabilize early learning). For large experiments, consider enabling an Optuna RDB storage (SQLite / Postgres) via `--storage` in the script.
-
-### Integrating the Best Config
-
-1. Run sweep.
-2. Inspect `best_reward_config.json`.
-3. POST fields into `/api/reward-config` (or modify the defaults in `reward_config.py` for a new baseline).
-4. Restart training and validate improvement (track average reward & lines).
-
-### Headless Mode for Faster Sweeps
-
-Set `HEADLESS=1` to bypass dashboard broadcasts during sweeps:
-
-```bash
-HEADLESS=1 python scripts/reward_sweep.py --trials 80 --device cuda
-```
-
-### Notes
-
-- The sweep harness uses a simplified single-env loop for relative ranking; absolute numbers may differ from multi-env dashboard runs.
-- Replay buffer is not persisted across trials (intentional for fairness and speed).
-- Pruning (MedianPruner) skips underperforming configs early—reduce `--pruner-startup-trials` if you want more aggressive pruning.
-
-
 ## Web Dashboard
 
 Start the web server:
@@ -143,64 +58,28 @@ scripts/run_demo.py                  # Random policy session export demo
 
 ## Notes
 
-- The environment observation is a small feature vector: `[step, lines_cleared_total, holes, aggregate_height]` (planned simplification may remove holes in a future revision)
-- Reward signal (current minimal scheme): line clear reward minus imbalance penalty (and optional step penalty), plus top-out penalty on termination.
+- The environment observation is a small feature vector: `[step, lines_cleared_total, holes, aggregate_height]`
+- Reward signal: lines cleared per step minus small step penalty (-0.01)
 - Frontend rendering uses ASCII transformation of board state; active piece marked with `*`.
 - Colored board: dashboard also renders a color grid using standard Tetris piece palette.
 
-### Minimal Reward Scheme
+### Reward Shaping (Enhanced)
 
-Legacy multi-term shaping (holes deltas, bumpiness deltas, density, survival bonus, etc.) was removed to keep the signal transparent. The current reward is the sum of:
+The environment now applies additional shaping to accelerate learning:
 
-1. Line clear reward (non-linear table)  
-2. Minus column imbalance penalty  
-3. Minus per-column hole presence penalty  
-4. Plus (optionally) a per-step penalty (typically zero)  
-5. Plus top-out penalty when the episode terminates due to stacking to the spawn area (negative value)  
+| Component | Description | Default Weight/Effect |
+|-----------|-------------|------------------------|
+| Line clear base | Non-linear: 1,3,5,8 for clearing 1–4 lines | Encourages multi-line clears |
+| Step penalty | Constant per action | -0.01 |
+| Survival bonus | Small reward each step survived | +0.002 |
+| Holes delta | Penalizes creation, rewards reduction | -0.20 per new hole (implicit sign handling) |
+| Height delta | Penalizes stack height growth | -0.005 per aggregate height increase |
+| Bumpiness delta | Penalizes uneven surface increases | -0.01 per bumpiness increase |
+| Top-out penalty | Applied when topping out | -2.0 |
 
-Imbalance penalty: For each column i we compare its height h_i to the average height of all other columns. Excess_i = max(0, h_i - avg_{-i}). We either sum or take the max of these excesses (mode configurable) and then apply:  
-penalty = scale * (metric ** power).  
-Higher power (>1) exaggerates large disparities. This discourages building a single spike while still allowing strategic wells when tuned appropriately.
+Breakdowns are exposed in `info['reward_components']` for interpretability along with `holes_delta`, `height_delta`, and `bump_delta`.
 
-Hole column penalty: We count how many columns contain at least one empty cell below a filled cell (a "hole"). Each such column incurs `hole_column_penalty`. This is a coarse, interpretable proxy discouraging scattered holes without micromanaging depth-weighted details.
-
-`info['reward_components']` exposes a per-step breakdown:
-
-```json
-{
-  "reward_components": {
-    "base_line": 3.0,
-    "step_penalty": 0.0,
-    "imbalance_penalty": -0.42,
-    "hole_column_penalty": -0.10,
-    "top_out": 0.0,
-    "total": 2.48
-  },
-  "heights": [5,6,6,9,11,4,3,2,2,1],
-  "hole_columns": 1,
-  "imbalance_metric": 8.4
-}
-```
-
-### Reward Parameters
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `line_reward_1` | float | 1.0 | Reward for clearing a single line. |
-| `line_reward_2` | float | 3.0 | Reward for a double line clear. |
-| `line_reward_3` | float | 5.0 | Reward for a triple line clear. |
-| `line_reward_4` | float | 8.0 | Reward for a Tetris (4 lines). |
-| `step_penalty` | float | 0.0 | Small negative per step (0.0 disables). |
-| `imbalance_penalty_scale` | float | 0.05 | Linear scale applied after computing imbalance metric (and power). |
-| `imbalance_penalty_power` | float | 1.0 | Power applied to imbalance metric before scaling; >1 amplifies large spikes. |
-| `imbalance_mode` | str (`sum`|`max`) | `sum` | Aggregation over per-column excesses. |
-| `hole_column_penalty` | float | 0.0 | Penalty per column that contains at least one hole (enable by setting >0). |
-| `top_out_penalty` | float | -10.0 | Applied once when topping out. |
-
-Tuning suggestions:
-- Start with `hole_column_penalty` =~ 0.05–0.15 if you see persistent early holes. Set back to 0.0 if policy becomes too conservative about creating wells.
-- Increase `imbalance_penalty_scale` only if you observe tall single-column spikes; raising `imbalance_penalty_power` to 1.2–1.5 can be more targeted than scaling directly.
-- Keep line reward ratios roughly increasing (1,3,5,8) to bias toward multi-line clears.
+These weights are intentionally conservative; adjust as needed for stability. Potential-based shaping could be added later for policy invariance.
 
 ### Dynamic Reward Configuration (Live Tuning)
 
@@ -231,7 +110,19 @@ Dashboard UI:
 
 The web dashboard now includes a "Reward Config" panel with editable numeric fields. Press "Apply" to send a batch update. Values are immediately used by subsequent environment steps (the active episode picks up changes without restart since the environment reads the shared config each step).
 
-Legacy fields like `holes_weight`, `bumpiness_weight`, `survival_bonus`, etc. are no longer honored.
+`reward_components` now also includes a `structural_breakdown` with per-term contributions:
+
+```json
+"reward_components": {
+  "base_line": 0,
+  "step_penalty": -0.01,
+  "structural": -0.034,
+  "survival": 0.002,
+  "top_out": 0,
+  "structural_breakdown": {
+     "holes": -0.02,
+     "height": -0.004,
+     "bumpiness": -0.01
   },
   "config_hash": 123456789
 }
@@ -464,7 +355,7 @@ Solution: Combine:
 - `holes_weight` (delta-based: punishes creation, rewards removal)
 - `holes_abs_weight` (persistent pressure: every existing hole costs each step)
 
-Objective = mean episode reward (Stage 1) with re-evaluation of top-K under longer horizons (Stage 2). With the simplified reward, reward magnitude correlates more directly with line-clear efficiency and balanced stacking.
+Tuning suggestions:
 
 - Start with a small magnitude (e.g. -0.02 * holes). If agent still stacks above cavities without clearing, increase gradually (up to -0.05).
 - If agent becomes overly conservative (avoids risk leading to low line clears), reduce absolute penalty and rely more on delta shaping plus stronger line rewards.
@@ -525,9 +416,9 @@ Tuning Guidelines:
 - Start with only the delta term (keep `row_density_abs_weight = 0`) to avoid constant reward inflation; absolute term can be introduced later (e.g. 0.05–0.1) if the agent oscillates between compact and sparse states.
 - If density shaping dominates reward (agent fixates on micro-filling without clearing lines), reduce `row_density_delta_weight` or increase line clear rewards.
 - Combine with moderate holes penalties; overlapping signals can otherwise double-penalize the same structural flaw (a gap often contributes to both lower density and a hole if covered above).
-### Minimal Reward Philosophy
+
 Observability:
-All legacy shaping (holes, bumpiness, density, survival bonuses, depth-weighted penalties) was removed to reduce implicit biases and make tuning transparent. If you want to re-introduce shaping, consider starting with potential-based terms to preserve optimal policy invariance.
+
 WebSocket `step` info includes `density_delta` and `density_after`. The structural breakdown adds:
 
 ```jsonc
@@ -558,19 +449,22 @@ Artifacts written to a run directory (e.g. `runs/exp1`):
 |------|-------------|
 | `policy_net.pt` | Final policy network weights only (for inference/deployment). |
 | `checkpoint_latest.pt` | Symlink (or copy fallback) pointing to the newest full checkpoint. |
-`reward_components` now contains only the minimal breakdown:
+| `checkpoint_00005.pt`, `checkpoint_00010.pt`, ... | Periodic full checkpoints (model, optimizer, replay buffer, RNG state, session stats). |
 | `episodes.jsonl` | One JSON per episode summary (append-only; safe for streaming analysis). |
 | `training_summary.txt` | Final aggregate reward / lines summary. |
-{
-  "reward_components": {
-    "base_line": 3.0,
-    "step_penalty": 0.0,
-    "imbalance_penalty": -0.42,
-    "top_out": 0.0,
-    "total": 2.58
-  },
-  "heights": [5,6,6,9,11,4,3,2,2,1]
-}
+
+Checkpoint contents include:
+
+- Policy + target network state dicts
+- Optimizer state dict
+- Replay buffer (transitions list + pointer)
+- Full `Session` object (including completed `Episode` objects)
+- Global step counter
+- Python, Torch (CPU & CUDA) RNG states (best-effort restore)
+- Original training config fields
+
+#### Enabling Periodic Checkpoints
+
 Configure via `TrainingConfig`:
 
 ```python
@@ -617,11 +511,14 @@ You can also switch GPUs/CPUs; checkpoint tensors are loaded to CPU first then m
 {"index":12,"total_reward":4.75,"lines_cleared":2,"steps":498,"terminated":true,"truncated":false,"interrupted":false,"max_height":11,"holes_final":3,"notable_flags":[]}
 ```
 
-*(Legacy hole / bumpiness shaping removed — see previous revision if you need those details.)*
-```bash
-*(Depth-weighted hole penalties removed.)*
+Tail the file in real time:
 
-*(Row density shaping removed to keep reward surface simple.)*
+```bash
+tail -f runs/exp1/episodes.jsonl
+```
+
+#### Best Practices
+
 - Keep `replay_capacity` constant across resumes to avoid distribution shift; resizing is not currently supported.
 - If you change reward shaping drastically mid-run, consider starting a fresh directory unless you explicitly want mixed-policy replay.
 - For evaluation-only usage, load `policy_net.pt`; you do not need full checkpoints.
