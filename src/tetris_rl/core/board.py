@@ -169,6 +169,23 @@ class TetrisBoard:
                     holes += 1
         return holes
 
+    def hole_columns(self) -> int:
+        """Number of columns that contain at least one hole (empty after first filled)."""
+        count = 0
+        for x in range(WIDTH):
+            block_seen = False
+            has_hole = False
+            for y in range(HEIGHT):
+                filled = bool(self.grid[y][x])
+                if filled:
+                    block_seen = True
+                elif block_seen and not filled:
+                    has_hole = True
+                    break
+            if has_hole:
+                count += 1
+        return count
+
     def weighted_holes(self, power: float = 1.0) -> float:
         """Depth-weighted hole measure.
 

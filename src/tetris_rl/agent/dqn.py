@@ -70,3 +70,44 @@ class DQN(nn.Module):
             return q
         else:
             return self.head(feats)
+
+    # --- Introspection helper for UI ---
+    def forward_with_activations(self, x: torch.Tensor):
+        """Forward pass that also returns intermediate activations for visualization.
+
+        Returns (q_values, activations_dict) where activations_dict structure:
+            {
+              'layers': [list[float], ...],  # post-ReLU activations per hidden layer
+              'advantages': list[float] | None,
+              'value': float | None
+            }
+        """
+        was_training = self.training
+        # Use eval mode so dropout / layernorm behave consistently for display
+        if was_training:
+            self.eval()
+        with torch.no_grad():
+            x = x.float()
+            acts: List[List[float]] = []
+            current = x
+            # Manually iterate through body to capture after each ReLU
+            for m in self.body:
+                current = m(current)
+                if isinstance(m, nn.ReLU):
+                    acts.append(current.detach().cpu().tolist())
+            if self.dueling:
+                adv = self.adv_head(current)
+                val = self.val_head(current)
+                adv_mean = adv.mean(dim=-1, keepdim=True)
+                q = val + (adv - adv_mean)
+                q_list = q.squeeze(0).cpu().tolist()
+                adv_list = adv.squeeze(0).cpu().tolist()
+                val_scalar = float(val.squeeze(0).item())
+                result = q_list, {"layers": acts, "advantages": adv_list, "value": val_scalar}
+            else:
+                q = self.head(current)
+                q_list = q.squeeze(0).cpu().tolist()
+                result = q_list, {"layers": acts, "advantages": None, "value": None}
+        if was_training:
+            self.train()
+        return result

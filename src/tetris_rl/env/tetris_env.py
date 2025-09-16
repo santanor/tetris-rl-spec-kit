@@ -28,23 +28,88 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
         self.board = TetrisBoard(seed=seed)
         self.max_steps = max_steps
         self.reward_config = reward_config or RewardConfig()
-        # feature vector length 3 from board.feature_vector + step count
-        self.observation_space = spaces.Box(low=0.0, high=1000.0, shape=(4,), dtype=np.float32)  # type: ignore[arg-type]
-        self.action_space = spaces.Discrete(5)  # 5 actions defined in board step mapping (# type: ignore[arg-type])
+        # Extended feature vector (dynamic) will be built on first reset; placeholder shape here.
+        self._obs_dim = 0
+        self.observation_space = spaces.Box(low=-10_000.0, high=10_000.0, shape=(1,), dtype=np.float32)  # type: ignore[arg-type]
+        self.action_space = spaces.Discrete(5)  # type: ignore[arg-type]
         self._step_count = 0
 
     def _build_obs(self):
-        feats = self.board.feature_vector()
-        return np.array([float(self._step_count)] + feats, dtype=np.float32)
+        """Construct extended normalized feature vector.
+
+        Components (example order):
+          0: step_fraction (step / max_steps)
+          1: holes (normalized)
+          2: aggregate_height (normalized)
+          3: bumpiness (normalized)
+          4: lines_cleared_total (normalized)
+          5: holes_delta
+          6: height_delta
+          7: bumpiness_delta
+          8: weighted_holes (normalized)
+          9: weighted_holes_delta
+          Piece one-hot (7): indices 10-16
+        Total = 17 features.
+        """
+        max_holes = 200.0
+        max_agg_height = 10 * 20.0
+        max_bump = 8 * 20.0
+        max_lines = 200.0
+        max_weighted = 20.0 ** 4  # loose upper bound with power weighting
+
+        holes = self.board.holes()
+        agg_h = self.board.aggregate_height()
+        bump = self.board.bumpiness()
+        weighted_h = self.board.weighted_holes(getattr(self.reward_config, 'holes_depth_power', 1.0))
+
+        step_fraction = float(self._step_count) / float(max(1, self.max_steps))
+
+        # Deltas use last cached values
+        holes_delta = holes - getattr(self, '_prev_holes', 0.0)
+        height_delta = agg_h - getattr(self, '_prev_agg_height', 0.0)
+        bump_delta = bump - getattr(self, '_prev_bump', 0.0)
+        weighted_delta = weighted_h - getattr(self, '_prev_weighted_h', 0.0)
+
+        piece_one_hot = [0.0]*7
+        if self.board.active:
+            kinds = ['I','O','T','S','Z','J','L']
+            try:
+                piece_one_hot[kinds.index(self.board.active.kind)] = 1.0
+            except ValueError:
+                pass
+
+        feats = [
+            step_fraction,
+            holes / max_holes,
+            agg_h / max_agg_height,
+            bump / max_bump,
+            self.board.lines_cleared_total / max_lines,
+            holes_delta,
+            height_delta / 20.0,
+            bump_delta / 50.0,
+            weighted_h / max_weighted,
+            weighted_delta / max_weighted,
+        ] + piece_one_hot
+
+        arr = np.array(feats, dtype=np.float32)
+        self._obs_dim = arr.shape[0]
+        return arr
 
     def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):  # type: ignore[override]
         if seed is not None:
-            # re-seed board RNG
             self.board = TetrisBoard(seed=seed)
         else:
             self.board = TetrisBoard(seed=0)
         self._step_count = 0
+        # reset historical metrics for deltas
+        self._prev_holes = 0.0
+        self._prev_agg_height = 0.0
+        self._prev_bump = 0.0
+        self._prev_weighted_h = 0.0
         obs = self._build_obs()
+        # Update observation_space to reflect real dimension
+        if self.observation_space.shape != (obs.shape[0],):  # type: ignore[truthy-bool]
+            self.observation_space = spaces.Box(low=-10_000.0, high=10_000.0, shape=(obs.shape[0],), dtype=np.float32)  # type: ignore[arg-type]
         return obs, {}
 
     def step(self, action: int):  # type: ignore[override]
@@ -130,6 +195,11 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
         terminated = top_out
         truncated = self._step_count >= self.max_steps
         obs = self._build_obs()
+        # cache prev metrics for next delta
+        self._prev_holes = holes_after
+        self._prev_agg_height = height_after
+        self._prev_bump = bump_after
+        self._prev_weighted_h = weighted_holes_after
         info: Dict[str, Any] = {
             "lines_delta": lines_delta,
             "locked": locked,

@@ -57,7 +57,7 @@ class TrainingConfig:
     def __post_init__(self):
         if self.hidden_layers is None:
             # Default deeper network now
-            self.hidden_layers = [256, 256, 256]
+            self.hidden_layers = [64, 64]
 
 
 def _compute_epsilon(step: int, cfg: TrainingConfig) -> float:

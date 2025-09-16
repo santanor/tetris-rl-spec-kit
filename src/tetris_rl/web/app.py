@@ -101,9 +101,14 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
 
     device = _resolve_device(cfg.device)
     rng = random.Random(cfg.seed)
+    # Probe environment once for observation dimension (dynamic features)
+    _tmp_env = TetrisEnv(seed=rng.randint(0, 1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
+    _probe_obs, _ = _tmp_env.reset()
+    obs_dim = int(len(_probe_obs))
+    _tmp_env.close()
     _hidden = cfg.hidden_layers or [256, 256, 256]
-    policy_net = DQN((4,), 5, hidden_layers=_hidden, dueling=cfg.dueling, use_layer_norm=cfg.use_layer_norm, dropout=cfg.dropout)  # type: ignore[arg-type]
-    target_net = DQN((4,), 5, hidden_layers=_hidden, dueling=cfg.dueling, use_layer_norm=cfg.use_layer_norm, dropout=cfg.dropout)  # type: ignore[arg-type]
+    policy_net = DQN((obs_dim,), 5, hidden_layers=_hidden, dueling=cfg.dueling, use_layer_norm=cfg.use_layer_norm, dropout=cfg.dropout)  # type: ignore[arg-type]
+    target_net = DQN((obs_dim,), 5, hidden_layers=_hidden, dueling=cfg.dueling, use_layer_norm=cfg.use_layer_norm, dropout=cfg.dropout)  # type: ignore[arg-type]
     optimizer = torch.optim.Adam(policy_net.parameters(), lr=cfg.lr)
     buffer = ReplayBuffer(capacity=cfg.replay_capacity, seed=cfg.seed)
     global_step = 0
@@ -231,6 +236,17 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
             if global_step % cfg.target_sync == 0:
                 target_net.load_state_dict(policy_net.state_dict())
             global_step += 1
+            # Network introspection (q-values + activations) for UI
+            try:
+                q_vals, acts = policy_net.forward_with_activations(state_t.unsqueeze(0))  # type: ignore[attr-defined]
+            except Exception:
+                q_vals, acts = [], {"layers": [], "advantages": None, "value": None}
+            net_meta = {
+                "input_dim": obs_dim,
+                "hidden_layers": _hidden,
+                "num_actions": 5,
+                "dueling": cfg.dueling,
+            }
             # broadcast
             step_payload = {
                 "episode": ep_idx,
@@ -244,6 +260,11 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
                 "epsilon": last_eps,
                 "temperature": last_temp,
                 "action_source": src,
+                "q_values": q_vals,
+                "net_meta": net_meta,
+                "net_activations": acts,
+                "heights": current_board.heights() if current_board else None,
+                "hole_columns": current_board.hole_columns() if current_board else None,
             }
             if info.get("lines_delta"):
                 line_clears_this_ep += info.get("lines_delta",0)
