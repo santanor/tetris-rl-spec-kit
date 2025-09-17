@@ -1,17 +1,19 @@
-# Tetris RL Demo
+# Tetris RL (Minimal Demo)
 
-Reinforcement learning demo with a simplified Tetris environment, DQN baseline training loop, and a real-time web dashboard for visualization.
+Clean, small reinforcement learning demo for Tetris using a minimal DQN (plain MLP) and a lightweight real‑time dashboard. All experimental/extra features (multi‑env, complex reward shaping, dueling heads, exploration variants, checkpoint/resume, model hot‑swap) have been removed to keep the code easy to read and hack on.
 
-## Features
+## What You Get
 
-- Simplified Tetris core (`TetrisBoard`) with line clearing and feature extraction
-- Gym-like environment wrapper (`TetrisEnv`)
-- DQN training (epsilon-greedy, replay buffer, target network sync)
-- Real-time web dashboard (FastAPI + WebSocket + Chart.js) for:
-  - Live board state
-  - Per-step reward & loss
-  - Episode reward aggregation
-  - Session summary
+* Core Tetris logic (`TetrisBoard`)
+* Minimal environment wrapper (`TetrisEnv`) exposing a 12‑dim observation
+* Basic DQN (configurable hidden sizes only)
+* Single‑env training loop (epsilon‑greedy, replay buffer, target network)
+* FastAPI + WebSocket dashboard with:
+  * Live board & colored grid
+  * Recent episode rewards & lines
+  * Loss & reward charts (sliding window)
+  * Minimal reward component bar (line / survival / top‑out)
+  * Simple network activation & Q‑value visualization
 
 ## Quick Start
 
@@ -29,9 +31,9 @@ Run a quick training demo (non-visual):
 python scripts/train_demo.py
 ```
 
-## Web Dashboard
+## Run the Dashboard
 
-Start the web server:
+Launch the server:
 
 ```bash
 python -m uvicorn tetris_rl.web.app:app --reload
@@ -39,29 +41,73 @@ python -m uvicorn tetris_rl.web.app:app --reload
 
 Then open: <http://127.0.0.1:8000/>
 
-Click "Start Training" to begin streaming a session. Adjust episode count before launching.
+Open http://127.0.0.1:8000 and click Start. Adjust the episode count first if desired. The page streams per‑step telemetry until all episodes finish.
 
-If you see a raw message saying static files not found, ensure the directory `src/tetris_rl/web/static` exists (it is included in repo) and that you launched with the correct working directory (project root).
+## Layout
 
-## Project Layout
-
-```text
-src/tetris_rl/core/board.py          # Tetris board logic
-src/tetris_rl/env/tetris_env.py      # Gym-style env wrapper
-src/tetris_rl/agent/dqn.py           # DQN network definition
-src/tetris_rl/agent/trainer.py       # Training loop with callback support
-src/tetris_rl/web/app.py             # FastAPI app + websocket streaming
-src/tetris_rl/web/static/            # Frontend assets (index.html, main.js, styles.css)
-scripts/train_demo.py                # CLI training demo
-scripts/run_demo.py                  # Random policy session export demo
+```
+src/tetris_rl/core/board.py      # Board + piece mechanics
+src/tetris_rl/env/tetris_env.py  # Minimal env (12-dim obs, simple reward)
+src/tetris_rl/agent/dqn.py       # Plain MLP Q-network
+src/tetris_rl/agent/trainer.py   # Small single-env training loop
+src/tetris_rl/web/app.py         # FastAPI + websocket streaming
+src/tetris_rl/web/static/        # Frontend (index.html, main.js, styles.css)
+scripts/train_demo.py            # Headless training example
 ```
 
-## Notes
+## Observation (12 features)
 
-- The environment observation is a small feature vector: `[step, lines_cleared_total, holes, aggregate_height]`
-- Reward signal: lines cleared per step minus small step penalty (-0.01)
-- Frontend rendering uses ASCII transformation of board state; active piece marked with `*`.
-- Colored board: dashboard also renders a color grid using standard Tetris piece palette.
+```
+[ h0..h9 (normalized column heights), lines_fraction, step_fraction ]
+```
+* Column heights are each /20.
+* `lines_fraction` = total_lines_cleared / 200 (rough normalization).
+* `step_fraction` = step_index / max_steps.
+
+## Reward (Minimal Scheme)
+
+| Component | Description |
+|-----------|-------------|
+| line_reward_N | Reward for clearing N lines simultaneously (monotonic table) |
+| survival | Small positive reward every non-terminal step |
+| top_out_penalty | Large negative penalty applied once when the board tops out |
+
+Defaults (see `RewardConfig`): 1:1.0, 2:3.0, 3:5.0, 4:8.0, survival:0.02, top_out:-10.0.
+
+No hole / height / bumpiness shaping. The agent must discover structure purely from line rewards and survival.
+
+## Network
+
+Simple feedforward MLP: input -> (Linear+ReLU)*N -> Linear(num_actions). Hidden sizes come from `TrainingConfig.hidden_layers` (default `[64, 64]`).
+
+## Training Loop Basics
+
+1. Epsilon-greedy with exponential decay: `eps = eps_end + (eps_start-eps_end)*exp(-t/decay)`
+2. Replay buffer warm-up gate (`min_replay`)
+3. Target network sync every `target_sync` steps
+4. Smooth L1 (Huber) loss on Q-learning target `r + gamma * max_a' Q_target(s', a')`
+
+## Customize Quickly
+
+Edit `RewardConfig` for reward tweaks or `TrainingConfig` for learning params. Because the code path is short, changes are easy to reason about.
+
+## Why So Minimal?
+
+The project previously experimented with: multi-env batching, deep reward shaping (holes, bumpiness, depth weights, density), dueling heads, layer norm, dropout, advanced exploration schedules, live hyperparameter editing, checkpoint/resume. All were intentionally removed to present a clear baseline you can extend selectively.
+
+## Extending (Suggestions)
+
+* Add next-piece feature to the observation.
+* Replace hand-crafted features with a downsampled grid + conv net.
+* Reintroduce (selectively) shaping if learning is too slow.
+* Implement prioritized replay or Double DQN.
+
+## License
+
+MIT
+
+---
+Happy tinkering! Keep it small; add only what you can justify with learning curves.
 
 ### Reward Shaping (Enhanced)
 

@@ -1,9 +1,7 @@
 const boardEl = document.getElementById('board');
 const startBtn = document.getElementById('startBtn');
 const episodesInput = document.getElementById('episodesInput');
-const numEnvsInput = document.getElementById('numEnvsInput');
-const broadcastEveryInput = document.getElementById('broadcastEveryInput');
-const profileEveryInput = document.getElementById('profileEveryInput');
+// (Removed multi-env / broadcast / profile inputs)
 const statEpisode = document.getElementById('statEpisode');
 const statGlobalStep = document.getElementById('statGlobalStep');
 const statReward = document.getElementById('statReward');
@@ -411,10 +409,7 @@ function updateBoard(snapshot){
 
 async function startTraining(){
   const ep = parseInt(episodesInput.value)||5; 
-  const nenv = parseInt(numEnvsInput.value)||1;
-  const be = parseInt(broadcastEveryInput.value)||1;
-  const pe = profileEveryInput ? parseInt(profileEveryInput.value)||0 : 0;
-  const qs = new URLSearchParams({ episodes:String(ep), num_envs:String(nenv), broadcast_every:String(be), profile_every:String(pe)});
+  const qs = new URLSearchParams({ episodes:String(ep)});
   await fetch(`/api/train?${qs.toString()}`, { method:'POST'});
 }
 startBtn.addEventListener('click', startTraining);
