@@ -142,8 +142,14 @@ def run_training(output_dir: Path, cfg: TrainingConfig | None = None, step_callb
             action, meta = select_action(policy_net, state_t, global_step, cfg, 5)
             next_state, reward, done, truncated, info = env.step(action)
             buffer.push(state, action, reward, next_state, done or truncated)
-            # record minimal structural placeholders (holes/height not exposed in minimal env; use zeros)
-            episode_obj.record_step(reward, info.get("lines_delta", 0), holes=0, height=0)
+            # record structural metrics if exposed
+            sf = info.get("state_features") or {}
+            episode_obj.record_step(
+                reward,
+                info.get("lines_delta", 0),
+                holes=int(sf.get("holes", 0)),
+                height=int(sf.get("aggregate_height", 0)),
+            )
             state = next_state
             loss_val = optimize(policy_net, target_net, buffer, cfg, optimizer, device)
             if global_step % cfg.target_sync == 0:

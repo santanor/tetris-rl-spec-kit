@@ -2,29 +2,41 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Dict, Any
 
+
 @dataclass
 class RewardConfig:
-    """Minimal reward configuration.
+    """Minimal reward configuration with mild structural shaping.
 
-    Philosophy (reset / simplified):
-      - Reward ONLY for clearing lines. (Higher for more simultaneous clears.)
-      - Small positive reward each step survived to encourage longevity.
-      - Large negative penalty when topping out (episode terminates).
-    No structural shaping (holes / height / bumpiness) is applied; the agent must
-    implicitly learn structural strategies purely from delayed line + survival signals.
+    Components
+    -----------
+    line_reward_[1-4]:  Monotonic rewards for clearing 1..4 lines.
+    survival_reward:    Small per non-terminal step reward (longevity).
+    top_out_penalty:    Large negative on episode termination (discourage topping out).
+    placement shaping:  On every piece lock we compare hole count (before vs after).
+        * If holes_after > holes_before  -> placement_hole_penalty (negative)
+        * Else (maintain or reduce)      -> placement_no_hole_reward (positive)
+
+    Design intent: Placement shaping accelerates learning of "avoid creating new holes"
+    without encoding full handcrafted heuristics (aggregate height, bumpiness). Its
+    magnitudes are intentionally smaller than typical multi-line clear bonuses so that
+    clearing lines remains the dominant objective.
     """
 
-    # Line clear rewards (can be tuned but intentionally simple & monotonic)
+    # Line clear rewards (simple & monotonic)
     line_reward_1: float = 1.0
     line_reward_2: float = 3.0
     line_reward_3: float = 5.0
     line_reward_4: float = 8.0
 
-    # Per-step survival reward (applied on every non-terminal step)
+    # Survival incentive
     survival_reward: float = 0.02
 
-    # Penalty applied once when the board tops out
+    # Terminal penalty
     top_out_penalty: float = -10.0
+
+    # Placement shaping
+    placement_no_hole_reward: float = 0.4
+    placement_hole_penalty: float = -0.6
 
     def line_table(self) -> Dict[int, float]:
         return {1: self.line_reward_1, 2: self.line_reward_2, 3: self.line_reward_3, 4: self.line_reward_4}

@@ -1,7 +1,7 @@
 const boardEl = document.getElementById('board');
 const startBtn = document.getElementById('startBtn');
 const episodesInput = document.getElementById('episodesInput');
-// (Removed multi-env / broadcast / profile inputs)
+const broadcastEveryInput = document.getElementById('broadcastEveryInput');
 const statEpisode = document.getElementById('statEpisode');
 const statGlobalStep = document.getElementById('statGlobalStep');
 const statReward = document.getElementById('statReward');
@@ -413,6 +413,18 @@ async function startTraining(){
   await fetch(`/api/train?${qs.toString()}`, { method:'POST'});
 }
 startBtn.addEventListener('click', startTraining);
+// Dynamic broadcast cadence update
+if(broadcastEveryInput){
+  broadcastEveryInput.addEventListener('change', async ()=>{
+    const v = parseInt(broadcastEveryInput.value)||1;
+    broadcastEveryInput.value = String(Math.max(1,v));
+    try {
+      await fetch('/api/broadcast-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ broadcast_every: parseInt(broadcastEveryInput.value) }) });
+    } catch(e){ console.warn('Failed to update broadcast cadence'); }
+  });
+  // Initialize from server
+  (async ()=>{ try { const r = await fetch('/api/broadcast-config'); if(r.ok){ const js = await r.json(); if(js.broadcast_every){ broadcastEveryInput.value = js.broadcast_every; } } } catch(e){} })();
+}
 // Keyboard shortcut: press 's' to start training
 window.addEventListener('keydown', (e)=>{
   if(e.key === 's' || e.key === 'S'){
@@ -562,8 +574,8 @@ ws.onmessage = (event)=>{
       configStatus.textContent = 'Config synced';
       setTimeout(()=>{ if(configStatus.textContent==='Config synced') configStatus.textContent=''; }, 1500);
     }
-  } else if(msg.type === 'training_config_update'){
-    // (Ignored - training config removed)
+  } else if(msg.type === 'broadcast_config_update'){
+    if(broadcastEveryInput){ broadcastEveryInput.value = msg.broadcast_every; }
   }
   // Per-step streaming updates for loss + reward components
   if(msg.type === 'step'){
