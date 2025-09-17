@@ -34,7 +34,7 @@ class TrainingConfig:
     # Epsilon‑greedy (simple exponential decay only)
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
-    epsilon_decay: int = 500  # larger => slower decay
+    epsilon_decay: int = 300  # Option E: faster decay to exploit structural signals sooner
     # Infrastructure
     target_sync: int = 200
     replay_capacity: int = 20_000
@@ -46,7 +46,7 @@ class TrainingConfig:
 
     def __post_init__(self):
         if self.hidden_layers is None:
-            self.hidden_layers = [64, 64]
+            self.hidden_layers = [128, 128, 64]
 
 
 def _compute_epsilon(step: int, cfg: TrainingConfig) -> float:

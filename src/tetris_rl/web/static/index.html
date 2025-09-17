@@ -76,9 +76,15 @@
         <label>4 lines <input name="line_reward_4" type="number" step="0.01"/></label>
         <label>Survival <input name="survival_reward" type="number" step="0.001"/></label>
         <label>Top-out <input name="top_out_penalty" type="number" step="0.1"/></label>
+        <label>No-hole + <input name="placement_no_hole_reward" type="number" step="0.01"/></label>
+        <label>Hole penalty <input name="placement_hole_penalty" type="number" step="0.01"/></label>
+        <label>Lock reward <input name="lock_reward" type="number" step="0.01"/></label>
+        <label>Skyline flat + <input name="skyline_flat_reward" type="number" step="0.01"/></label>
+        <label>Skyline raise - <input name="skyline_raise_penalty" type="number" step="0.01"/></label>
+        <label>Skyline spread thr <input name="skyline_spread_threshold" type="number" step="0.01"/></label>
         <div class="config-actions"><button type="submit">Apply</button><span id="configStatus" class="status"></span></div>
       </form>
-      <div class="mini-help">Minimal scheme: reward per lines cleared, small survival reward, top-out penalty.</div>
+      <div class="mini-help">Shaping: lines + survival + skyline flattening (reward) vs spikes (penalty), hole avoidance, lock reward. Adjust carefully.</div>
     </section>
   </main>
   <div id="networkTooltip"></div>

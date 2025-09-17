@@ -66,6 +66,10 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
 
         # Track holes before action IF a lock might happen (we just inspect before calling board.step)
         holes_before = self.board.holes()
+        heights_before = self.board.heights()
+        max_before = max(heights_before) if heights_before else 0
+        sorted_before = sorted(heights_before, reverse=True)
+        second_before = sorted_before[1] if len(sorted_before) > 1 else max_before
 
         lines_delta, top_out, locked = self.board.step(int(action))
 
@@ -75,15 +79,30 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
 
         # Placement structural shaping (evaluated only when a piece locks and not due to top-out early spawn collision)
         placement_reward = 0.0
+        lock_flat = 0.0
+        skyline_reward = 0.0
         if locked:
             holes_after = self.board.holes()
             if holes_after > holes_before:  # created at least one new hole
                 placement_reward = cfg.placement_hole_penalty
             else:  # maintained or reduced hole count
                 placement_reward = cfg.placement_no_hole_reward
+            lock_flat = cfg.lock_reward
+            # Skyline shaping: compare tallest column behavior
+            heights_after = self.board.heights()
+            if heights_after:
+                max_after = max(heights_after)
+                sorted_after = sorted(heights_after, reverse=True)
+                second_after = sorted_after[1] if len(sorted_after) > 1 else max_after
+                # If we raised the skyline and the spread is above threshold -> penalty
+                if max_after > max_before and (max_after - second_after)/20.0 > cfg.skyline_spread_threshold:
+                    skyline_reward = cfg.skyline_raise_penalty
+                else:
+                    # Reward any lock that doesn't exacerbate a spike (including filling gaps / flattening)
+                    skyline_reward = cfg.skyline_flat_reward
         # NOTE: If top_out, we still apply placement shaping for the final lock; can reconsider if noisy.
 
-        reward = line_reward + survival + placement_reward
+        reward = line_reward + survival + placement_reward + lock_flat + skyline_reward
         if top_out:
             reward += cfg.top_out_penalty
 
@@ -103,6 +122,8 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
                 "line_reward": line_reward,
                 "survival": survival,
                 "placement": placement_reward,
+                "lock": lock_flat,
+                "skyline": skyline_reward,
                 "top_out": cfg.top_out_penalty if top_out else 0.0,
                 "total": reward,
                 "config_hash": hash(tuple(sorted(cfg.to_dict().items()))),

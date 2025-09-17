@@ -24,7 +24,27 @@ training_task: Optional[asyncio.Task] = None
 reward_config = RewardConfig()  # shared minimal reward config
 broadcast_every: int = 1  # dynamically adjustable cadence
 training_mode: str = "idle"  # 'idle' | 'dashboard' | 'headless'
-headless_stats: Dict[str, Any] = {"episodes": 0, "last_reward": 0.0, "last_lines": 0, "avg_reward": 0.0, "avg_lines": 0.0, "global_step": 0}
+headless_stats: Dict[str, Any] = {
+    "episodes": 0,
+    "last_reward": 0.0,
+    "last_lines": 0,
+    "avg_reward": 0.0,
+    "avg_lines": 0.0,
+    "global_step": 0,
+    # New aggregated reward component diagnostics (rolling window)
+    "avg_components": {
+        "line_reward": 0.0,
+        "survival": 0.0,
+        "placement": 0.0,
+        "top_out": 0.0,
+    },
+    "last_components": {
+        "line_reward": 0.0,
+        "survival": 0.0,
+        "placement": 0.0,
+        "top_out": 0.0,
+    },
+}
 
 # (All dynamic training/model override machinery removed for minimal demo)
 
@@ -297,6 +317,7 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
     episode_counter = 0
     reward_window: list[float] = []
     lines_window: list[int] = []
+    comp_window: list[Dict[str, float]] = []
     start_time = time.time()
     import torch
     # Reduce CPU thread contention (often helps for small models)
@@ -314,6 +335,10 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                 state,_ = env.reset()
                 done = False; truncated = False
                 ep_reward = 0.0; ep_lines = 0
+                ep_line = 0.0
+                ep_surv = 0.0
+                ep_place = 0.0
+                ep_top = 0.0
                 while not (done or truncated):
                     state_t = torch.tensor(state, dtype=torch.float32, device=device)
                     action, meta = select_action(policy_net, state_t, global_step, cfg, 5)
@@ -328,13 +353,35 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                     state = next_state
                     ep_reward += reward
                     ep_lines = info.get("lines_cleared_total", ep_lines)
+                    rc = info.get("reward_components", {})
+                    ep_line += rc.get("line_reward", 0.0)
+                    ep_surv += rc.get("survival", 0.0)
+                    ep_place += rc.get("placement", 0.0)
+                    # top_out component only applied once at termination; accumulate anyway
+                    ep_top += rc.get("top_out", 0.0)
                     global_step += 1
                 env.close()
                 episode_counter += 1
                 reward_window.append(ep_reward)
                 lines_window.append(ep_lines)
+                comp_window.append({
+                    "line_reward": ep_line,
+                    "survival": ep_surv,
+                    "placement": ep_place,
+                    "top_out": ep_top,
+                })
                 if len(reward_window) > 100:
                     reward_window.pop(0); lines_window.pop(0)
+                if len(comp_window) > 100:
+                    comp_window.pop(0)
+                # Rolling averages for components
+                if comp_window:
+                    avg_line = sum(c["line_reward"] for c in comp_window)/len(comp_window)
+                    avg_surv = sum(c["survival"] for c in comp_window)/len(comp_window)
+                    avg_place = sum(c["placement"] for c in comp_window)/len(comp_window)
+                    avg_top = sum(c["top_out"] for c in comp_window)/len(comp_window)
+                else:
+                    avg_line = avg_surv = avg_place = avg_top = 0.0
                 headless_stats.update({
                     "episodes": episode_counter,
                     "last_reward": ep_reward,
@@ -343,6 +390,18 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                     "avg_lines": sum(lines_window)/len(lines_window),
                     "global_step": global_step,
                     "device": str(device),
+                    "last_components": {
+                        "line_reward": ep_line,
+                        "survival": ep_surv,
+                        "placement": ep_place,
+                        "top_out": ep_top,
+                    },
+                    "avg_components": {
+                        "line_reward": avg_line,
+                        "survival": avg_surv,
+                        "placement": avg_place,
+                        "top_out": avg_top,
+                    },
                 })
                 if (episode_counter % print_every) == 0:
                     elapsed = time.time() - start_time

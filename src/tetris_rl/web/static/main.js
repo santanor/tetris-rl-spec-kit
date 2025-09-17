@@ -54,10 +54,10 @@ function initCharts(){
   componentsChart = new Chart(compCtx,{
     type:'bar',
     data:{
-      labels:['line_reward','survival','top_out'],
+      labels:['line_reward','survival','placement','lock','skyline','top_out'],
       datasets:[{
         label:'Value',
-        data:[0,0,0],
+        data:[0,0,0,0,0,0],
         backgroundColor:(ctx)=>{ const v = ctx.raw; return (typeof v === 'number' && v >= 0) ? '#10b981' : '#ef4444'; }
       }]
     },
@@ -82,9 +82,12 @@ function initCharts(){
                 const sum = ds.reduce((a,b)=> a + (typeof b==='number'? b : (parseFloat(b)||0)), 0);
                 const pct = sum ? (raw / (sum||1) * 100).toFixed(1) : '0.0';
                 let expl = '';
-                if(label==='line_reward') expl = 'Reward for lines cleared this step (higher for multi-line clears).';
-                else if(label==='survival') expl = 'Small reward for surviving a step (not top-out).';
-                else if(label==='top_out') expl = 'Penalty applied only when topping out.';
+                if(label==='line_reward') expl = 'Lines cleared this step (multi-line bonus).';
+                else if(label==='survival') expl = 'Alive step bonus (non-terminal).';
+                else if(label==='placement') expl = 'Hole avoidance / creation shaping on lock.';
+                else if(label==='lock') expl = 'Flat reward each piece lock.';
+                else if(label==='skyline') expl = 'Flattening reward or spike penalty based on tallest column spread.';
+                else if(label==='top_out') expl = 'Penalty when topping out.';
                 return `${label}: ${raw.toFixed(3)} (${pct}% of step total)\n${expl}`;
               } catch(err){
                 return ctx.label + ': ' + ctx.raw;
