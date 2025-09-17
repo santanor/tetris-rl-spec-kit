@@ -72,7 +72,15 @@ async def ws_endpoint(websocket: WebSocket):
         if websocket in websocket_clients:
             websocket_clients.remove(websocket)
 
-async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto", resume_from: Optional[str] = None):
+async def training_loop(
+    output_dir: Path,
+    episodes: int,
+    device_str: str = "auto",
+    resume_from: Optional[str] = None,
+    num_envs: int = 1,
+    broadcast_every: int = 1,
+    profile_every: int = 0,
+):
     global current_board
     from tetris_rl.env.tetris_env import TetrisEnv
     from tetris_rl.models.episode import Episode
@@ -199,102 +207,145 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
         except Exception as e:  # log but continue training
             asyncio.create_task(broadcast({"type": "checkpoint_error", "error": str(e)}))
 
-    for ep_idx in range(base_episode, base_episode + cfg.episodes):
-        # Pass shared reward_config so runtime changes propagate to new episodes
-        env = TetrisEnv(seed=rng.randint(0, 1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
-        state, _ = env.reset()
-        episode = Episode(index=ep_idx)
-        line_clears_this_ep = 0
-        structural_sum = {"holes":0.0, "height":0.0, "bumpiness":0.0}
-        structural_steps = 0
-        action_counts = {"random":0, "greedy":0, "boltzmann":0}
-        last_eps = None
-        last_temp = None
-        done = False
-        truncated = False
-        while not (done or truncated):
-            # Access underlying board through env
-            current_board = env.board
+    # ---- Multi-env setup ----
+    num_envs = max(1, int(num_envs))
+    broadcast_every = max(1, int(broadcast_every))
+    envs: List[TetrisEnv] = []
+    states: List[Any] = []
+    episodes_live: List[Episode] = []
+    line_clears_ep: List[int] = []
+    action_counts_ep: List[Dict[str,int]] = []
+    epsilons: List[Optional[float]] = []
+    temps: List[Optional[float]] = []
+
+    for i in range(num_envs):
+        e = TetrisEnv(seed=rng.randint(0,1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
+        s,_ = e.reset()
+        envs.append(e)
+        states.append(s)
+        episodes_live.append(Episode(index=0))
+        line_clears_ep.append(0)
+        action_counts_ep.append({"random":0,"greedy":0,"boltzmann":0})
+        epsilons.append(None)
+        temps.append(None)
+
+    episodes_completed = 0
+    next_global_episode_index = 0
+
+    import time
+    loop_start = time.perf_counter()
+    last_profile_t = loop_start
+
+    while episodes_completed < cfg.episodes:
+        # Iterate each env
+        for env_idx, env in enumerate(envs):
+            if episodes_completed >= cfg.episodes:
+                break
+            episode_obj = episodes_live[env_idx]
+            # If episode already terminated for this env, start a new one
+            if episode_obj.terminated or episode_obj.truncated:
+                # start new episode only if we still need more
+                if episodes_completed < cfg.episodes:
+                    episodes_live[env_idx] = Episode(index=next_global_episode_index)
+                    episode_obj = episodes_live[env_idx]
+                    line_clears_ep[env_idx] = 0
+                    action_counts_ep[env_idx] = {"random":0,"greedy":0,"boltzmann":0}
+                    epsilons[env_idx] = None
+                    temps[env_idx] = None
+                    next_global_episode_index += 1
+                else:
+                    continue
+            # Skip if already finished all required episodes
+            if episodes_completed >= cfg.episodes:
+                break
             import torch as _torch
+            state = states[env_idx]
             state_t = _torch.tensor(state, dtype=_torch.float32, device=device)
-            # Re-apply mutable exploration overrides each step for live tuning
+            # Live overrides (exploration)
             for _k in ("epsilon_start","epsilon_end","epsilon_decay","epsilon_schedule","epsilon_mid","epsilon_mid_step","exploration_strategy","temperature_start","temperature_end","temperature_decay"):
                 if _k in training_overrides:
                     setattr(cfg, _k, training_overrides[_k])
             action, meta = select_action(policy_net, state_t, global_step, cfg, 5)
-            # Track exploration meta
-            src = meta.get("action_source", "?")
-            if src in action_counts:
-                action_counts[src] += 1
-            last_eps = meta.get("epsilon", last_eps)
-            last_temp = meta.get("temperature", last_temp)
+            src = meta.get("action_source","?")
+            if src in action_counts_ep[env_idx]:
+                action_counts_ep[env_idx][src] += 1
+            epsilons[env_idx] = meta.get("epsilon", epsilons[env_idx])
+            temps[env_idx] = meta.get("temperature", temps[env_idx])
             next_state, reward, done, truncated, info = env.step(action)
+            # For episode logging: use actual board stats (holes, height) even though not in obs
+            holes_now = env.board.holes()
+            agg_height_now = env.board.aggregate_height()
+            episode_obj.record_step(reward, info.get("lines_delta",0), holes_now, agg_height_now)
             buffer.push(state, action, reward, next_state, done or truncated)
-            episode.record_step(reward, info.get("lines_delta", 0), int(next_state[3]), int(next_state[2]))
-            state = next_state
+            states[env_idx] = next_state
             loss_val = optimize(policy_net, target_net, buffer, cfg, optimizer, device)
             if global_step % cfg.target_sync == 0:
                 target_net.load_state_dict(policy_net.state_dict())
             global_step += 1
-            # Network introspection (q-values + activations) for UI
-            try:
-                q_vals, acts = policy_net.forward_with_activations(state_t.unsqueeze(0))  # type: ignore[attr-defined]
-            except Exception:
-                q_vals, acts = [], {"layers": [], "advantages": None, "value": None}
-            net_meta = {
-                "input_dim": obs_dim,
-                "hidden_layers": _hidden,
-                "num_actions": 5,
-                "dueling": cfg.dueling,
-            }
-            # broadcast
-            step_payload = {
-                "episode": ep_idx,
-                "global_step": global_step,
-                "reward": reward,
-                "loss": loss_val,
-                "lines_cleared_total": info.get("lines_cleared_total"),
-                "lines_delta": info.get("lines_delta"),
-                "board": current_board.snapshot() if current_board else None,
-                "reward_components": info.get("reward_components"),
-                "epsilon": last_eps,
-                "temperature": last_temp,
-                "action_source": src,
-                "q_values": q_vals,
-                "net_meta": net_meta,
-                "net_activations": acts,
-                "heights": current_board.heights() if current_board else None,
-                "hole_columns": current_board.hole_columns() if current_board else None,
-            }
             if info.get("lines_delta"):
-                line_clears_this_ep += info.get("lines_delta",0)
-            rc = info.get("reward_components") or {}
-            sb = rc.get("structural_breakdown") or {}
-            for k in structural_sum:
-                structural_sum[k] += float(sb.get(k,0.0))
-            structural_steps += 1
-            await broadcast({"type": "step", **step_payload})
-            # Save checkpoint every 20 global steps (and not on step 0)
+                line_clears_ep[env_idx] += info.get("lines_delta",0)
+            # Episode end handling
+            if done or truncated:
+                episode_obj.finalize(terminated=bool(done), truncated=bool(truncated), interrupted=False, reason="top_out" if done else None)
+                session_reward += episode_obj.total_reward
+                episodes_completed += 1
+                await broadcast({
+                    "type": "episode_end",
+                    "episode": episode_obj.index,
+                    "reward": episode_obj.total_reward,
+                    "line_clears": line_clears_ep[env_idx],
+                    "action_dist": {k: (v/sum(action_counts_ep[env_idx].values()) if sum(action_counts_ep[env_idx].values()) else 0.0) for k,v in action_counts_ep[env_idx].items()},
+                    "last_epsilon": epsilons[env_idx],
+                    "last_temperature": temps[env_idx],
+                })
+            # Broadcast step telemetry (respect broadcast_every)
+            if (global_step % broadcast_every) == 0 or done or truncated:
+                # Visualize using this env's state / board
+                current_board = env.board
+                try:
+                    q_vals, acts = policy_net.forward_with_activations(state_t.unsqueeze(0))  # type: ignore[attr-defined]
+                except Exception:
+                    q_vals, acts = [], {"layers": [], "advantages": None, "value": None}
+                net_meta = {
+                    "input_dim": obs_dim,
+                    "hidden_layers": _hidden,
+                    "num_actions": 5,
+                    "dueling": cfg.dueling,
+                }
+                step_payload = {
+                    "episode": episode_obj.index,
+                    "global_step": global_step,
+                    "env_index": env_idx,
+                    "reward": reward,
+                    "loss": loss_val,
+                    "lines_cleared_total": info.get("lines_cleared_total"),
+                    "lines_delta": info.get("lines_delta"),
+                    "board": current_board.snapshot() if current_board else None,
+                    "board_snapshot": current_board.snapshot() if current_board else None,
+                    "reward_components": info.get("reward_components"),
+                    "epsilon": epsilons[env_idx],
+                    "temperature": temps[env_idx],
+                    "action_source": src,
+                    "last_action": action,
+                    "q_values": q_vals,
+                    "net_meta": net_meta,
+                    "net_activations": acts,
+                    "heights": current_board.heights() if current_board else None,
+                    "hole_columns": current_board.hole_columns() if current_board else None,
+                }
+                await broadcast({"type": "step", **step_payload})
+            # Checkpoint save cadence (still simple)
             if global_step > 0 and (global_step % 20 == 0):
-                _save_dashboard_checkpoint(ep_idx, final=False)
-            await asyncio.sleep(0)  # yield control
-        episode.finalize(terminated=bool(done), truncated=bool(truncated), interrupted=False, reason=None)
-        session_reward += episode.total_reward
-        env.close()
-        avg_struct = {k: (v/structural_steps if structural_steps else 0.0) for k,v in structural_sum.items()}
-        # Aggregate action source distribution
-        total_actions = sum(action_counts.values()) or 1
-        action_dist = {k: v/total_actions for k,v in action_counts.items()}
-        await broadcast({
-            "type": "episode_end",
-            "episode": ep_idx,
-            "reward": episode.total_reward,
-            "line_clears": line_clears_this_ep,
-            "avg_structural": avg_struct,
-            "action_dist": action_dist,
-            "last_epsilon": last_eps,
-            "last_temperature": last_temp,
-        })
+                _save_dashboard_checkpoint(next_global_episode_index-1, final=False)
+            # Lightweight profiling timestamp broadcast (optional)
+            if profile_every > 0 and (global_step % profile_every == 0):
+                now_t = time.perf_counter()
+                dt = now_t - last_profile_t
+                last_profile_t = now_t
+                await broadcast({"type":"profile", "global_step": global_step, "secs_since_last": dt})
+            await asyncio.sleep(0)  # cooperative yield
+
+    # Final session end broadcast after all episodes complete
     # (No per-episode checkpoint; handled by step cadence)
 
     # Final checkpoint
@@ -302,12 +353,26 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
     await broadcast({"type": "session_end", "episodes": cfg.episodes, "avg_reward": session_reward / cfg.episodes})
 
 @app.post("/api/train")
-async def start_training(episodes: int = 5, device: str = "auto"):
+async def start_training(
+    episodes: int = 5,
+    device: str = "auto",
+    num_envs: int = 1,
+    broadcast_every: int = 1,
+    profile_every: int = 0,
+):
     global training_task
     if training_task and not training_task.done():
         return {"status": "already-running"}
-    training_task = asyncio.create_task(training_loop(Path("training_runs/dashboard"), episodes, device))
-    return {"status": "started", "episodes": episodes, "device": device}
+    training_task = asyncio.create_task(training_loop(
+        Path("training_runs/dashboard"),
+        episodes,
+        device,
+        resume_from=None,
+        num_envs=num_envs,
+        broadcast_every=broadcast_every,
+        profile_every=profile_every,
+    ))
+    return {"status": "started", "episodes": episodes, "device": device, "num_envs": num_envs, "broadcast_every": broadcast_every, "profile_every": profile_every}
 
 @app.post("/api/resume")
 async def resume_training(checkpoint: str, episodes: int = 5, device: str = "auto"):

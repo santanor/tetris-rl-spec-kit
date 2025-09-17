@@ -94,7 +94,15 @@ class DQN(nn.Module):
             for m in self.body:
                 current = m(current)
                 if isinstance(m, nn.ReLU):
-                    acts.append(current.detach().cpu().tolist())
+                    vec = current.squeeze(0).detach().cpu().tolist()
+                    # Optional lightweight subsampling for very wide layers
+                    if isinstance(vec, list) and len(vec) > 96:
+                        # even subsample to 96 points (UI density control)
+                        step = len(vec) / 96.0
+                        sampled = [vec[int(i*step)] for i in range(96)]
+                        acts.append(sampled)
+                    else:
+                        acts.append(vec if isinstance(vec, list) else [float(vec)])
             if self.dueling:
                 adv = self.adv_head(current)
                 val = self.val_head(current)

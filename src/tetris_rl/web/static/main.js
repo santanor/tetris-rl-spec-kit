@@ -52,36 +52,14 @@ function initCharts(){
   rewardChart = new Chart(rewardCtx,{ type:'line', data:{ labels:[], datasets:[{ label:'Reward', data:[], borderColor:'#4ade80', tension:0.15, pointRadius:0, borderWidth:1.4 }, { label:'Reward MA', data:[], borderColor:'#22c55e', tension:0.15, pointRadius:0, borderWidth:1, borderDash:[3,3], hidden:true }] }, options: Object.assign({}, commonOpts, { plugins:{ legend:{ display:false } } }) });
   lossChart = new Chart(lossCtx,{ type:'line', data:{ labels:[], datasets:[ { label:'Loss', data:[], borderColor:'#0ea5e9', tension:0.15, pointRadius:0, borderWidth:1.2 }, { label:'EMA', data:[], borderColor:'#f59e0b', tension:0.15, pointRadius:0, borderWidth:1.2, borderDash:[4,3] } ] }, options: JSON.parse(JSON.stringify(commonOpts)) });
   linesChart = new Chart(linesCtx,{ type:'bar', data:{ labels:[], datasets:[{ label:'Lines', data:[], backgroundColor:'#6366f1' }, { label:'Lines MA', type:'line', data:[], borderColor:'#818cf8', tension:0.15, pointRadius:0, borderWidth:1, borderDash:[3,3], hidden:true }] }, options: JSON.parse(JSON.stringify(commonOpts)) });
-  // Reward component explanatory tooltips
-  const componentExplanations = () => {
-    // Attempt to pull live config from form (so tooltips stay accurate if user edits config)
-    const cfg = {};
-    if(configForm){
-      [...configForm.elements].forEach(el=>{ if(el.name && el.value !== undefined) cfg[el.name]=el.value; });
-    }
-    const lr1 = cfg.line_reward_1 || 1, lr2 = cfg.line_reward_2 || 3, lr3 = cfg.line_reward_3 || 6, lr4 = cfg.line_reward_4 || 12;
-    const stepP = cfg.step_penalty || 0.01;
-    const imbMode = cfg.imbalance_mode || 'max';
-    const imbScale = cfg.imbalance_penalty_scale || 0.04;
-    const imbPow = cfg.imbalance_penalty_power || 1.0;
-    const holePenalty = cfg.hole_column_penalty || 0.1;
-    const topOut = cfg.top_out_penalty || -12;
-    return {
-      base_line: `Line clear reward (1:${lr1},2:${lr2},3:${lr3},4:${lr4}) lines this step`,
-      imbalance_penalty: `Negative: - (worst column excess^${imbPow} * ${imbScale}) mode=${imbMode}`,
-      hole_column_penalty: `Negative: - (hole_columns * ${holePenalty})` ,
-      step_penalty: `${stepP >= 0 ? 'Survival bonus' : 'Step penalty'} (${stepP})`,
-      top_out: `Applied only on top-out (${topOut})`
-    };
-  };
   // Reward components horizontal bar chart with rich tooltip explanations
   componentsChart = new Chart(compCtx,{
     type:'bar',
     data:{
-      labels:['base_line','imbalance_penalty','hole_column_penalty','step_penalty','top_out'],
+      labels:['line_reward','survival','top_out'],
       datasets:[{
         label:'Value',
-        data:[0,0,0,0,0],
+        data:[0,0,0],
         backgroundColor:(ctx)=>{ const v = ctx.raw; return (typeof v === 'number' && v >= 0) ? '#10b981' : '#ef4444'; }
       }]
     },
@@ -100,14 +78,16 @@ function initCharts(){
             label:(ctx)=>{
               try {
                 const label = ctx.label;
-                const explanations = componentExplanations();
                 const rawVal = ctx.raw ?? 0;
                 const raw = (typeof rawVal === 'number') ? rawVal : parseFloat(rawVal) || 0;
                 const ds = ctx.chart.data.datasets[0].data;
                 const sum = ds.reduce((a,b)=> a + (typeof b==='number'? b : (parseFloat(b)||0)), 0);
                 const pct = sum ? (raw / (sum||1) * 100).toFixed(1) : '0.0';
-                const expl = explanations[label] || label;
-                return `${label}: ${raw.toFixed(3)} (${pct}% of sum)\n${expl}`;
+                let expl = '';
+                if(label==='line_reward') expl = 'Reward for lines cleared this step (higher for multi-line clears).';
+                else if(label==='survival') expl = 'Small reward for surviving a step (not top-out).';
+                else if(label==='top_out') expl = 'Penalty applied only when topping out.';
+                return `${label}: ${raw.toFixed(3)} (${pct}% of step total)\n${expl}`;
               } catch(err){
                 return ctx.label + ': ' + ctx.raw;
               }
@@ -409,11 +389,12 @@ if(configForm){
 
 function updateBoard(snapshot){
   if(!snapshot) return;
-  const rows = snapshot.board || [];
-  boardEl.textContent = rows.map(r=>r.replace(/\./g,' ').replace(/#/g,'█').replace(/\*/g,'*')).join('\n');
+  const rows = snapshot.board || snapshot.rows || [];
+  if(boardEl){
+    boardEl.textContent = rows.map(r=>r.replace(/\./g,' ').replace(/#/g,'█').replace(/\*/g,'*')).join('\n');
+  }
   if(!colorBoard) return;
   if(snapshot.matrix){
-    // Clear existing
     while(colorBoard.firstChild) colorBoard.removeChild(colorBoard.firstChild);
     const activeMap = new Set();
     (snapshot.active_cells||[]).forEach(c=>activeMap.add(`${c.x},${c.y}`));
@@ -465,7 +446,8 @@ ws.onmessage = (event)=>{
   statLoss.textContent = (msg.loss||0).toFixed(4);
   if(typeof msg.epsilon === 'number' && statEpsilon){ statEpsilon.textContent = msg.epsilon.toFixed(3); }
     // Determine best env board
-    if(msg.best_board){ updateBoard(msg.best_board); }
+  if(msg.board){ updateBoard(msg.board); }
+  else if(msg.board_snapshot){ updateBoard(msg.board_snapshot); }
     // If server later adds last_action index: msg.last_action
     if(typeof msg.last_action === 'number'){ pushAction(msg.last_action); }
     if(msg.q_values){
@@ -520,6 +502,16 @@ ws.onmessage = (event)=>{
       statEpisode.textContent = msg.episode;
       statReward.textContent = msg.reward.toFixed(2);
       statLines.textContent = msg.line_clears;
+      // If backend supplies aggregate action_dist (random/greedy/boltzmann) we can annotate chart subtitle
+      if(msg.action_dist && actionChart){
+        // Convert distribution to pseudo last-window percent labels if strategy purely epsilon greedy
+        // We cannot map directly to L,R,CW,CCW,Drop, so just modify chart title attribute as quick reference.
+        const ad = msg.action_dist;
+        const titleEl = actionChart.canvas.parentElement.querySelector('.chart-title');
+        if(titleEl){
+          titleEl.setAttribute('title', `Action source mix: random ${(ad.random*100).toFixed(1)}%, greedy ${(ad.greedy*100).toFixed(1)}%, boltz ${(ad.boltzmann*100).toFixed(1)}%`);
+        }
+      }
       // Update episode-level charts
       if(rewardChart){
           rewardChart.data.labels.push(msg.episode);
@@ -562,7 +554,7 @@ ws.onmessage = (event)=>{
   } else if(msg.type === 'session_end'){
     console.log('Session ended', msg);
   } else if(msg.type === 'snapshot'){
-  updateBoard(msg.board);
+  updateBoard(msg.board || msg.board_snapshot);
   } else if(msg.type === 'config_update'){
     // Refresh form values to reflect authoritative config
     if(configForm){
@@ -602,7 +594,7 @@ ws.onmessage = (event)=>{
       epsilonChart.update('none');
     }
     if(componentsChart && msg.reward_components){
-      const order = ['base_line','imbalance_penalty','hole_column_penalty','step_penalty','top_out'];
+      const order = ['line_reward','survival','top_out'];
       componentsChart.data.datasets[0].data = order.map(k=> msg.reward_components[k] ?? 0);
       componentsChart.update('none');
     }

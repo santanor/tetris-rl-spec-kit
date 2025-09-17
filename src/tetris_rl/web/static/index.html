@@ -55,7 +55,7 @@
         <div class="chart-card"><div class="chart-title">Episode Reward (last 200)</div><canvas id="rewardChart"></canvas></div>
         <div class="chart-card"><div class="chart-title">Loss (EMA + raw)</div><canvas id="lossChart"></canvas></div>
         <div class="chart-card"><div class="chart-title">Lines per Episode</div><canvas id="linesChart"></canvas></div>
-        <div class="chart-card small"><div class="chart-title">Reward Components (latest)</div><canvas id="componentsChart"></canvas></div>
+  <div class="chart-card small"><div class="chart-title">Minimal Reward (latest)</div><canvas id="componentsChart"></canvas></div>
         <div class="chart-card small"><div class="chart-title">Action Distribution</div><canvas id="actionChart"></canvas></div>
         <div class="chart-card wide" id="networkCard">
           <div class="chart-title" style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;">
@@ -72,26 +72,15 @@
     <section class="panel config-panel">
       <div class="panel-title">Reward Config</div>
       <form id="rewardConfigForm" class="config-simple">
-        <label>1L <input name="line_reward_1" type="number" step="0.01"/></label>
-        <label>2L <input name="line_reward_2" type="number" step="0.01"/></label>
-        <label>3L <input name="line_reward_3" type="number" step="0.01"/></label>
-        <label>4L <input name="line_reward_4" type="number" step="0.01"/></label>
-        <label>Step <input name="step_penalty" type="number" step="0.001"/></label>
-        <label>Survival <input name="survival_bonus" type="number" step="0.001"/></label>
-        <label>Holes <input name="holes_weight" type="number" step="0.001"/></label>
-        <label>HolesAbs <input name="holes_abs_weight" type="number" step="0.001"/></label>
-        <label>WH Δ <input name="weighted_holes_weight" type="number" step="0.001"/></label>
-        <label>WH Abs <input name="weighted_holes_abs_weight" type="number" step="0.001"/></label>
-        <label>DepthPow <input name="holes_depth_power" type="number" step="0.1" min="0.5" max="4"/></label>
-        <label>HeightWt <input name="height_weight" type="number" step="0.001"/></label>
-        <label>BumpWt <input name="bumpiness_weight" type="number" step="0.001"/></label>
-        <label>TopOut <input name="top_out_penalty" type="number" step="0.1"/></label>
-        <label>DensΔ <input name="row_density_delta_weight" type="number" step="0.01"/></label>
-        <label>DensAbs <input name="row_density_abs_weight" type="number" step="0.01"/></label>
-        <label>DensClr <input name="row_density_line_clear_scale" type="number" step="0.1" min="0"/></label>
+        <label>1 line <input name="line_reward_1" type="number" step="0.01"/></label>
+        <label>2 lines <input name="line_reward_2" type="number" step="0.01"/></label>
+        <label>3 lines <input name="line_reward_3" type="number" step="0.01"/></label>
+        <label>4 lines <input name="line_reward_4" type="number" step="0.01"/></label>
+        <label>Survival <input name="survival_reward" type="number" step="0.001"/></label>
+        <label>Top-out <input name="top_out_penalty" type="number" step="0.1"/></label>
         <div class="config-actions"><button type="submit">Apply</button><span id="configStatus" class="status"></span></div>
       </form>
-      <div class="mini-help">Applies immediately to running episode.</div>
+      <div class="mini-help">Minimal scheme: reward per lines cleared, small survival reward, top-out penalty.</div>
     </section>
   </main>
   <div id="networkTooltip"></div>
@@ -99,25 +88,6 @@
   <script src="/static/main.js"></script>
 </body>
 </html>
-                  <form id="rewardConfigForm" class="config-simple">
-                    <label>1L <input name="line_reward_1" type="number" step="0.01"/></label>
-                    <label>2L <input name="line_reward_2" type="number" step="0.01"/></label>
-                    <label>3L <input name="line_reward_3" type="number" step="0.01"/></label>
-                    <label>4L <input name="line_reward_4" type="number" step="0.01"/></label>
-                    <label>Step <input name="step_penalty" type="number" step="0.001"/></label>
-                    <label>Imb Scale <input name="imbalance_penalty_scale" type="number" step="0.001"/></label>
-                    <label>Imb Power <input name="imbalance_penalty_power" type="number" step="0.01" min="1"/></label>
-                    <label>Mode
-                      <select name="imbalance_mode">
-                        <option value="sum">sum</option>
-                        <option value="max" selected>max</option>
-                      </select>
-                    </label>
-                    <label>Hole Col <input name="hole_column_penalty" type="number" step="0.001"/></label>
-                    <label>Top-Out <input name="top_out_penalty" type="number" step="0.1"/></label>
-                    <div class="config-actions"><button type="submit">Apply</button><span id="configStatus" class="status"></span></div>
-                  </form>
-                  <div class="mini-help">Applies immediately to running episode.</div>
                 </section>
               </main>
               <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
