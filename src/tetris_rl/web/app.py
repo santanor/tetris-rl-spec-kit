@@ -36,15 +36,17 @@ early_stop_config: Dict[str, Any] = {
 
 # Training performance / GPU utilization config
 train_perf_config: Dict[str, Any] = {
-    "use_amp": True,
-    "opt_steps_per_env_step": 8,
+    # Simplified defaults geared for throughput
+    "use_amp": False,
+    "opt_steps_per_env_step": 2,
     "grad_clip_norm": 10.0,
     "compile_model": False,
     "pin_memory": True,
     # additional knobs to better saturate GPU
-    "batch_size": 2048,
-    "min_replay": 6000,
-    "target_sync": 500,
+    "batch_size": 1024,
+    "min_replay": 4096,
+    "target_sync": 2000,
+    "num_envs": 16,
 }
 headless_stats: Dict[str, Any] = {
     "episodes": 0,
@@ -380,15 +382,9 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
     target_net.load_state_dict(policy_net.state_dict())
     policy_net.to(device); target_net.to(device)
     # Optional compile for faster forward passes
-    policy_exec: torch.nn.Module = policy_net  # type: ignore[assignment]
-    target_exec: torch.nn.Module = target_net  # type: ignore[assignment]
-    if cfg.compile_model:
-        try:
-            policy_exec = torch.compile(policy_net)  # type: ignore[attr-defined, assignment]
-            target_exec = torch.compile(target_net)  # type: ignore[attr-defined, assignment]
-        except Exception:
-            policy_exec = policy_net  # type: ignore[assignment]
-            target_exec = target_net  # type: ignore[assignment]
+    # Simplify GPU path in headless: avoid compile/AMP for predictable, low-overhead throughput
+    policy_exec: torch.nn.Module = policy_net
+    target_exec: torch.nn.Module = target_net
     optimizer = torch.optim.Adam(policy_net.parameters(), lr=cfg.lr)
     try:
         scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda' and cfg.use_amp))  # type: ignore[attr-defined]
@@ -397,6 +393,7 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
     buffer = ReplayBuffer(capacity=cfg.replay_capacity, seed=cfg.seed)
     global_step = 0
     episode_counter = 0
+    best_avg_reward = float('-inf')
     reward_window: list[float] = []
     lines_window: list[int] = []
     comp_window: list[Dict[str, float]] = []
@@ -413,51 +410,84 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
             # Re-evaluate episodes target if infinite (loop forever)
             target_episodes = episodes if not infinite else episodes or 1
             for _ in range(target_episodes):
-                env = TetrisEnv(seed=rng.randint(0,1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
-                state,_ = env.reset()
-                done = False; truncated = False
-                ep_reward = 0.0; ep_lines = 0
-                ep_line = 0.0
-                ep_surv = 0.0
-                ep_delta = 0.0
-                ep_hole = 0.0
-                ep_top = 0.0
-                while not (done or truncated):
-                    state_t = torch.tensor(state, dtype=torch.float32, device=device)
-                    action, meta = select_action(policy_exec, state_t, global_step, cfg, 5)
-                    next_state, reward, done, truncated, info = env.step(action)
-                    buffer.push(state, action, reward, next_state, done or truncated)
+                # Vectorized headless stepping with multiple envs (batch action selection on GPU)
+                num_envs = max(1, int(train_perf_config.get('num_envs', 1)))
+                envs = [TetrisEnv(seed=rng.randint(0,1_000_000), max_steps=cfg.max_steps, reward_config=reward_config) for _ in range(num_envs)]
+                states = []
+                for e in envs:
+                    s,_ = e.reset()
+                    states.append(s)
+                # Per-env running episode accumulators
+                ep_rewards = [0.0]*num_envs
+                ep_lines_arr = [0]*num_envs
+                ep_line = [0.0]*num_envs
+                ep_surv = [0.0]*num_envs
+                ep_delta = [0.0]*num_envs
+                ep_hole = [0.0]*num_envs
+                ep_top = [0.0]*num_envs
+
+                while True:
+                    # Batch action selection
+                    import numpy as _np, math as _math, random as _r
+                    batch = _np.stack(states).astype('float32')
+                    with torch.no_grad():
+                        q = policy_exec(torch.from_numpy(batch).to(device, non_blocking=True))
+                        greedy = q.argmax(dim=1).tolist()
+                    # Global epsilon schedule
+                    eps = (cfg.epsilon_end + (cfg.epsilon_start - cfg.epsilon_end) * _math.exp(-global_step / float(max(1, cfg.epsilon_decay))))
+                    actions = []
+                    for i in range(num_envs):
+                        if _r.random() < eps:
+                            actions.append(_r.randrange(5))
+                        else:
+                            actions.append(int(greedy[i]))
+                    # Step all envs, push transitions
+                    any_running = False
+                    for i, env in enumerate(envs):
+                        s = states[i]
+                        a = actions[i]
+                        ns, r, done, trunc, info = env.step(a)
+                        buffer.push(s, a, r, ns, done or trunc)
+                        states[i] = ns if not (done or trunc) else env.reset()[0]
+                        ep_rewards[i] += r
+                        ep_lines_arr[i] = info.get('lines_cleared_total', ep_lines_arr[i])
+                        rc = info.get('reward_components', {})
+                        ep_line[i] += rc.get('line_reward', 0.0)
+                        ep_surv[i] += rc.get('survival', 0.0)
+                        ep_delta[i] += rc.get('delta_stable', 0.0)
+                        ep_hole[i] += rc.get('hole_penalty', 0.0)
+                        ep_top[i] += rc.get('top_out', 0.0)
+                        if not (done or trunc):
+                            any_running = True
+                        else:
+                            # Episode finished for this env
+                            episode_counter += 1
+                            reward_window.append(ep_rewards[i])
+                            lines_window.append(ep_lines_arr[i])
+                            comp_window.append({
+                                'line_reward': ep_line[i],
+                                'survival': ep_surv[i],
+                                'delta_stable': ep_delta[i],
+                                'hole_penalty': ep_hole[i],
+                                'top_out': ep_top[i],
+                            })
+                            # Reset accumulators for next episode
+                            ep_rewards[i] = 0.0
+                            ep_lines_arr[i] = 0
+                            ep_line[i] = ep_surv[i] = ep_delta[i] = ep_hole[i] = ep_top[i] = 0.0
+                    # Optimize periodically (global cadence)
                     if (global_step % opt_every) == 0:
-                        # Perform potentially multiple optimization steps per env step to increase GPU work density
                         loss_val = 0.0
                         for _ in range(max(1, int(cfg.opt_steps_per_env_step))):
-                            loss_val = optimize(policy_exec, target_exec, buffer, cfg, optimizer, device, scaler)
-                    else:
-                        loss_val = 0.0
+                            loss_val = optimize(policy_exec, target_exec, buffer, cfg, optimizer, device, None)
                     if global_step % cfg.target_sync == 0:
                         target_net.load_state_dict(policy_net.state_dict())
-                    state = next_state
-                    ep_reward += reward
-                    ep_lines = info.get("lines_cleared_total", ep_lines)
-                    rc = info.get("reward_components", {})
-                    ep_line += rc.get("line_reward", 0.0)
-                    ep_surv += rc.get("survival", 0.0)
-                    ep_delta += rc.get("delta_stable", 0.0)
-                    ep_hole += rc.get("hole_penalty", 0.0)
-                    # top_out component only applied once at termination; accumulate anyway
-                    ep_top += rc.get("top_out", 0.0)
                     global_step += 1
-                env.close()
-                episode_counter += 1
-                reward_window.append(ep_reward)
-                lines_window.append(ep_lines)
-                comp_window.append({
-                    "line_reward": ep_line,
-                    "survival": ep_surv,
-                    "delta_stable": ep_delta,
-                    "hole_penalty": ep_hole,
-                    "top_out": ep_top,
-                })
+                    if not any_running:
+                        # All envs transitioned at least once to terminal in this cycle; continue outer loop
+                        break
+                for e in envs:
+                    e.close()
                 if len(reward_window) > 100:
                     reward_window.pop(0); lines_window.pop(0)
                 if len(comp_window) > 100:
@@ -471,20 +501,24 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                     avg_top = sum(c["top_out"] for c in comp_window)/len(comp_window)
                 else:
                     avg_line = avg_surv = avg_delta = avg_hole = avg_top = 0.0
+                # Derive last episode aggregates from the most recent entries if available
+                last_reward = reward_window[-1] if reward_window else 0.0
+                last_lines = lines_window[-1] if lines_window else 0
+                last_comp = comp_window[-1] if comp_window else {"line_reward":0.0,"survival":0.0,"delta_stable":0.0,"hole_penalty":0.0,"top_out":0.0}
                 headless_stats.update({
                     "episodes": episode_counter,
-                    "last_reward": ep_reward,
-                    "last_lines": ep_lines,
+                    "last_reward": last_reward,
+                    "last_lines": last_lines,
                     "avg_reward": sum(reward_window)/len(reward_window),
                     "avg_lines": sum(lines_window)/len(lines_window),
                     "global_step": global_step,
                     "device": str(device),
                     "last_components": {
-                        "line_reward": ep_line,
-                        "survival": ep_surv,
-                        "delta_stable": ep_delta,
-                        "hole_penalty": ep_hole,
-                        "top_out": ep_top,
+                        "line_reward": last_comp.get("line_reward", 0.0),
+                        "survival": last_comp.get("survival", 0.0),
+                        "delta_stable": last_comp.get("delta_stable", 0.0),
+                        "hole_penalty": last_comp.get("hole_penalty", 0.0),
+                        "top_out": last_comp.get("top_out", 0.0),
                     },
                     "avg_components": {
                         "line_reward": avg_line,
@@ -494,10 +528,27 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                         "top_out": avg_top,
                     },
                 })
+                # Checkpointing: save latest periodically and best by rolling avg reward
+                try:
+                    out_dir = Path("training_runs/headless")
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    if episode_counter > 0 and (episode_counter % 200) == 0:
+                        torch.save(policy_net.state_dict(), out_dir / "checkpoint_latest.pt")
+                    avgR = headless_stats.get("avg_reward", 0.0)
+                    if avgR > best_avg_reward + 1e-9:
+                        torch.save(policy_net.state_dict(), out_dir / "checkpoint_best.pt")
+                        (out_dir / "checkpoint_best.meta.json").write_text(json.dumps({
+                            "episodes": episode_counter,
+                            "avg_reward": avgR,
+                            "avg_lines": headless_stats.get("avg_lines", 0.0)
+                        }), encoding="utf-8")
+                        best_avg_reward = avgR
+                except Exception:
+                    pass
                 if (episode_counter % print_every) == 0:
                     elapsed = time.time() - start_time
                     eps_per_sec = episode_counter / max(1e-6, elapsed)
-                    print(f"[Headless] ep={episode_counter} reward={ep_reward:.2f} lines={ep_lines} avgR={headless_stats['avg_reward']:.2f} avgL={headless_stats['avg_lines']:.2f} steps={global_step} eps/s={eps_per_sec:.2f}", flush=True)
+                    print(f"[Headless] ep={episode_counter} reward={last_reward:.2f} lines={last_lines} avgR={headless_stats['avg_reward']:.2f} avgL={headless_stats['avg_lines']:.2f} steps={global_step} eps/s={eps_per_sec:.2f}", flush=True)
             if not infinite:
                 break
     except asyncio.CancelledError:
@@ -587,6 +638,7 @@ async def update_train_perf_config(payload: Dict[str, Any]):
         "batch_size": int,
         "min_replay": int,
         "target_sync": int,
+        "num_envs": int,
     }
     for k, caster in schema.items():
         if k in payload:
@@ -607,4 +659,51 @@ async def update_train_perf_config(payload: Dict[str, Any]):
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.post("/api/run-best")
+async def run_best_snapshot(device: str = "cuda", steps: int = 500):
+    """Load the latest best checkpoint and run a short visual demo (dashboard broadcast)."""
+    global training_task, training_mode, current_board
+    if training_task and not training_task.done():
+        return {"status": "already-running"}
+    # Inline demo: load checkpoint if present, step env, broadcast board frames
+    from tetris_rl.agent.dqn import DQN
+    from tetris_rl.env.tetris_env import TetrisEnv
+    import torch as _t, random as _rnd
+    training_mode = "dashboard"
+    try:
+        # Probe observation dimension
+        probe = TetrisEnv(seed=0, max_steps=steps, reward_config=reward_config)
+        obs,_ = probe.reset(); obs_dim = len(obs); probe.close()
+        device_t = _t.device("cuda" if (device=="cuda" and _t.cuda.is_available()) else "cpu")
+        # Use the same default hidden layers as headless training to ensure checkpoint compatibility
+        policy = DQN((obs_dim,), 5, hidden_layers=[64,64]).to(device_t)
+        ckpt = Path("training_runs/headless/checkpoint_best.pt")
+        used = False
+        if ckpt.exists():
+            policy.load_state_dict(_t.load(ckpt, map_location=device_t))
+            used = True
+        env = TetrisEnv(seed=_rnd.randint(0,1_000_000), max_steps=steps, reward_config=reward_config)
+        s,_ = env.reset()
+        total_reward = 0.0
+        total_lines = 0
+        for i in range(steps):
+            st = _t.tensor(s, dtype=_t.float32, device=device_t)
+            with _t.no_grad():
+                a = int(policy(st.unsqueeze(0)).argmax(dim=1).item())
+            ns, r, done, trunc, info = env.step(a)
+            total_reward += r; total_lines = info.get("lines_cleared_total", total_lines)
+            current_board = env.board
+            await broadcast({"type":"step","global_step":i,"reward":r,"lines_cleared_total":info.get("lines_cleared_total"),"board": current_board.snapshot()})
+            s = ns
+            if done or trunc:
+                break
+        await broadcast({"type":"episode_end","episode":0,"reward":total_reward,"line_clears":total_lines,"action_dist":{"random":0,"greedy":1,"boltzmann":0}})
+        env.close()
+        training_mode = "idle"
+        return {"status":"ok","used_checkpoint": used}
+    except Exception as e:
+        training_mode = "idle"
+        return {"status":"error","error":str(e)}
 

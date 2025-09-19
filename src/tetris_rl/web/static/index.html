@@ -77,10 +77,21 @@
         <label>Survival <input name="survival_reward" type="number" step="0.001"/></label>
         <label>Delta stable + <input name="delta_stable_reward" type="number" step="0.01"/></label>
         <label>Hole penalty/created <input name="hole_penalty_per" type="number" step="0.01"/></label>
+        <label>Bumpiness penalty scale <input name="bumpiness_penalty_scale" type="number" step="0.001"/></label>
+        <label>Height penalty scale <input name="height_penalty_scale" type="number" step="0.001"/></label>
+        <label>Efficiency bonus base <input name="efficiency_bonus_base" type="number" step="0.01"/></label>
+  <label>Row transition penalty <input name="row_transition_penalty" type="number" step="0.001"/></label>
+  <label>Column transition penalty <input name="col_transition_penalty" type="number" step="0.001"/></label>
+  <label>Buried block penalty <input name="buried_block_penalty" type="number" step="0.001"/></label>
+  <label>Landing height penalty <input name="landing_height_penalty" type="number" step="0.001"/></label>
+  <label>Ready line bonus <input name="ready_line_bonus" type="number" step="0.01"/></label>
+  <label>Well usage bonus <input name="well_usage_bonus" type="number" step="0.01"/></label>
+  <label>Overhang penalty <input name="overhang_penalty" type="number" step="0.01"/></label>
+  <label>Blocked well penalty <input name="blocked_well_penalty" type="number" step="0.01"/></label>
         <label>Top-out <input name="top_out_penalty" type="number" step="0.1"/></label>
         <div class="config-actions"><button type="submit">Apply</button><span id="configStatus" class="status"></span></div>
       </form>
-      <div class="mini-help">Rewards: lines (big), survival tick, delta-stable on lock (no skyline increase), per-hole penalty for newly created holes, and top-out penalty. Adjust carefully.</div>
+      <div class="mini-help">Rewards: line rewards (4-lines heavily rewarded), survival, delta-stable on lock, per-hole penalty (scaled), bumpiness and height penalties (small), efficiency bonus for multi-line clears, and top-out penalty. Tune cautiously.</div>
     </section>
     <!-- Early Stopping Config Panel -->
     <section class="panel config-panel">
@@ -107,12 +118,22 @@
         <label>AMP (mixed precision) <input name="use_amp" type="checkbox"/></label>
         <label>Batch size <input name="batch_size" type="number" min="1" step="1"/></label>
         <label>Opt steps / env step <input name="opt_steps_per_env_step" type="number" min="1" step="1"/></label>
+        <label># Envs (headless) <input name="num_envs" type="number" min="1" step="1"/></label>
         <label>Grad clip norm <input name="grad_clip_norm" type="number" step="0.1"/></label>
         <label>Compile model (PyTorch 2) <input name="compile_model" type="checkbox"/></label>
         <label>Pin memory <input name="pin_memory" type="checkbox"/></label>
         <div class="config-actions"><button type="submit">Apply</button><span id="trainPerfStatus" class="status"></span></div>
       </form>
       <div class="mini-help">Increase optimizer steps per env step to keep the GPU busy. AMP speeds up compute on CUDA. Compile model may improve throughput on PyTorch 2.x. Use clipping for stability.</div>
+    </section>
+    <!-- Snapshots Panel -->
+    <section class="panel config-panel">
+      <div class="panel-title">Snapshots</div>
+      <div class="config-simple">
+        <button id="runBestBtn" type="button">Run Best Snapshot (GPU)</button>
+        <span id="snapStatus" class="status"></span>
+        <div class="mini-help">Loads the latest saved best snapshot and runs a short demo to visualize progress.</div>
+      </div>
     </section>
   </main>
   <div id="networkTooltip"></div>

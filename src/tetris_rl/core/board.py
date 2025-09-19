@@ -254,8 +254,223 @@ class TetrisBoard:
         hs = self.heights()
         return sum(abs(hs[i]-hs[i+1]) for i in range(len(hs)-1))
 
+    def max_well_depth(self) -> int:
+        """Return the maximum well depth.
+
+        A well at column i is defined as max(0, min(h[i-1], h[i+1]) - h[i]). Edges are ignored.
+        """
+        hs = self.heights()
+        if len(hs) < 3:
+            return 0
+        max_depth = 0
+        for i in range(1, len(hs)-1):
+            depth = min(hs[i-1], hs[i+1]) - hs[i]
+            if depth > max_depth:
+                max_depth = depth
+        return max(0, max_depth)
+
+    def has_i_dependency(self, threshold: int = 4) -> bool:
+        """Heuristic: returns True if there exists a 1-wide deep well that likely requires a vertical I.
+
+        We consider any internal column i such that min(h[i-1], h[i+1]) - h[i] >= threshold.
+        """
+        return self.max_well_depth() >= max(1, int(threshold))
+
+    def simulate_lines_cleared_if_drop_current(self) -> int:
+        """Simulate a hard drop of the current active piece at its current x/rotation and
+        return how many lines would be cleared by locking it in place. Does not mutate real state.
+        """
+        if not self.active:
+            return 0
+        # find final y by descending until collision
+        piece = self.active
+        y = piece.y
+        while True:
+            test = ActivePiece(piece.kind, piece.rotation, piece.x, y+1)
+            if self._collision(test):
+                break
+            y += 1
+            if y > HEIGHT:
+                break
+        final_y = y
+        # temp grid with piece locked
+        temp_grid: List[List[object]] = [row[:] for row in self.grid]
+        for dx, dy in self.active_shape_cells():
+            ax = piece.x + dx
+            ay = final_y + dy
+            if 0 <= ax < WIDTH and 0 <= ay < HEIGHT:
+                temp_grid[ay][ax] = piece.kind  # type: ignore[index]
+        # count full rows
+        cleared = 0
+        for row in temp_grid:
+            if all(row):
+                cleared += 1
+        return cleared
+
     def feature_vector(self) -> List[float]:
         return [float(self.lines_cleared_total), float(self.holes()), float(self.aggregate_height())]
+
+    # --- Additional surface/shape planning features ---
+    def row_transitions_total(self) -> int:
+        """Count filled↔empty transitions across each row, including boundaries.
+        Boundary treated as empty. So for a row, transitions = (left boundary → c0) + Σ(ci-1→ci) + (c9 → right boundary).
+        """
+        total = 0
+        for y in range(HEIGHT):
+            prev_filled = False  # boundary empty
+            for x in range(WIDTH):
+                cur_filled = bool(self.grid[y][x])
+                if cur_filled != prev_filled:
+                    total += 1
+                prev_filled = cur_filled
+            # right boundary (empty)
+            if prev_filled:  # filled → empty
+                total += 1
+        return total
+
+    def col_transitions_total(self) -> int:
+        """Count filled↔empty transitions down each column, including top/bottom boundaries.
+        Boundary treated as empty.
+        """
+        total = 0
+        for x in range(WIDTH):
+            prev_filled = False  # top boundary empty
+            for y in range(HEIGHT):
+                cur_filled = bool(self.grid[y][x])
+                if cur_filled != prev_filled:
+                    total += 1
+                prev_filled = cur_filled
+            if prev_filled:  # filled → empty at bottom boundary
+                total += 1
+        return total
+
+    def overhang_cells_count(self) -> int:
+        """Count filled cells that have an empty cell directly above (floating/overhang)."""
+        count = 0
+        for y in range(1, HEIGHT):
+            row = self.grid[y]
+            row_above = self.grid[y-1]
+            for x in range(WIDTH):
+                if row[x] and not row_above[x]:
+                    count += 1
+        return count
+
+    def covered_by_blocks_count(self) -> int:
+        """Count filled cells that have another filled cell directly above (buried under blocks)."""
+        count = 0
+        for y in range(1, HEIGHT):
+            row = self.grid[y]
+            row_above = self.grid[y-1]
+            for x in range(WIDTH):
+                if row[x] and row_above[x]:
+                    count += 1
+        return count
+
+    def total_blocks(self) -> int:
+        return sum(1 for y in range(HEIGHT) for x in range(WIDTH) if self.grid[y][x])
+
+    def landing_final_y_current(self) -> Optional[int]:
+        """Return final y of the active piece's origin after drop (does not mutate)."""
+        if not self.active:
+            return None
+        piece = self.active
+        y = piece.y
+        while True:
+            test = ActivePiece(piece.kind, piece.rotation, piece.x, y+1)
+            if self._collision(test):
+                break
+            y += 1
+            if y > HEIGHT:
+                break
+        return y
+
+    def landing_height_current(self) -> float:
+        """Compute landing height as the height of the highest block of the piece after placement (0..HEIGHT).
+        Returns float height (not normalized).
+        """
+        if not self.active:
+            return 0.0
+        final_y = self.landing_final_y_current()
+        if final_y is None:
+            return 0.0
+        max_block_y = max(final_y + dy for _, dy in self.active_shape_cells())
+        height = max(0, HEIGHT - (max_block_y + 1))
+        return float(height)
+
+    def piece_contact_current(self) -> int:
+        """Compute contact sides for the active piece when dropped at current x/rotation.
+        Counts side contacts (left/right) and bottom contacts against either border or filled cells.
+        """
+        if not self.active:
+            return 0
+        final_y = self.landing_final_y_current()
+        if final_y is None:
+            return 0
+        contact = 0
+        piece = self.active
+        cells = [(piece.x + dx, final_y + dy) for dx, dy in self.active_shape_cells()]
+        occ = set(cells)
+        for (ax, ay) in cells:
+            # left
+            nx, ny = ax-1, ay
+            if nx < 0 or (0 <= ny < HEIGHT and self.grid[ny][nx] and (nx,ny) not in occ):
+                contact += 1
+            # right
+            nx = ax+1; ny = ay
+            if nx >= WIDTH or (0 <= ny < HEIGHT and self.grid[ny][nx] and (nx,ny) not in occ):
+                contact += 1
+            # bottom
+            nx = ax; ny = ay+1
+            if ny >= HEIGHT or (0 <= ny < HEIGHT and self.grid[ny][nx] and (nx,ny) not in occ):
+                contact += 1
+        return contact
+
+    def _temp_grid_with_current_locked(self) -> List[List[object]]:
+        """Return a copy of the grid with current piece locked at its landing position."""
+        if not self.active:
+            return [row[:] for row in self.grid]
+        final_y = self.landing_final_y_current()
+        temp = [row[:] for row in self.grid]
+        if final_y is None:
+            return temp
+        piece = self.active
+        for dx, dy in self.active_shape_cells():
+            ax = piece.x + dx; ay = final_y + dy
+            if 0 <= ax < WIDTH and 0 <= ay < HEIGHT:
+                temp[ay][ax] = piece.kind  # type: ignore[index]
+        return temp
+
+    def count_ready_lines_after_current(self) -> int:
+        """Count rows that would be 1 cell away from clearing after locking the current piece.
+        A ready line = row with exactly 1 empty cell (i.e., 9 filled).
+        """
+        temp = self._temp_grid_with_current_locked()
+        ready = 0
+        for y in range(HEIGHT):
+            filled = sum(1 for x in range(WIDTH) if temp[y][x])
+            if filled == WIDTH - 1:
+                ready += 1
+        return ready
+
+    def count_deep_i_wells(self, threshold: int = 4) -> int:
+        hs = self.heights()
+        cnt = 0
+        for i in range(1, len(hs)-1):
+            depth = min(hs[i-1], hs[i+1]) - hs[i]
+            if depth >= threshold:
+                cnt += 1
+        return cnt
+
+    def count_o_gaps(self) -> int:
+        """Count simple 2x2 empty squares that could fit an O piece (support heuristic: bottom row supported or bottom boundary)."""
+        cnt = 0
+        for y in range(HEIGHT-1):
+            for x in range(WIDTH-1):
+                if not self.grid[y][x] and not self.grid[y][x+1] and not self.grid[y+1][x] and not self.grid[y+1][x+1]:
+                    # support: either bottom row is HEIGHT-1 (bottom boundary) or cells below are filled
+                    if y+1 == HEIGHT-1 or (self.grid[y+2][x] if y+2 < HEIGHT else True) and (self.grid[y+2][x+1] if y+2 < HEIGHT else True):
+                        cnt += 1
+        return cnt
 
     # --- Serialization helpers ---
     def board_state(self, include_active: bool = True) -> List[str]:

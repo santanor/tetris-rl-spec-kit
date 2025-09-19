@@ -19,6 +19,8 @@ const earlyStopForm = document.getElementById('earlyStopForm');
 const earlyStopStatus = document.getElementById('earlyStopStatus');
 const trainPerfForm = document.getElementById('trainPerfForm');
 const trainPerfStatus = document.getElementById('trainPerfStatus');
+const runBestBtn = document.getElementById('runBestBtn');
+const snapStatus = document.getElementById('snapStatus');
 // Removed exploration, model config, resume, charts for simplified UI
 
 // (Charts removed)
@@ -58,7 +60,7 @@ function initCharts(){
   componentsChart = new Chart(compCtx,{
     type:'bar',
     data:{
-      labels:['line_reward','survival','delta_stable','hole_penalty','top_out'],
+  labels:['line_reward','survival','delta_stable','hole_penalty','bumpiness_penalty','height_penalty','transition_penalty','buried_penalty','overhang_penalty','landing_penalty','ready_bonus','well_bonus','blocked_well_penalty','top_out'],
       datasets:[{
         label:'Value',
         data:[0,0,0,0,0],
@@ -493,6 +495,22 @@ window.addEventListener('keydown', (e)=>{
   }
 });
 
+if(runBestBtn){
+  runBestBtn.addEventListener('click', async ()=>{
+    snapStatus.textContent = 'Running demo...';
+    try{
+      const r = await fetch('/api/run-best', { method:'POST' });
+      const js = await r.json();
+      if(js.status === 'ok'){
+        snapStatus.textContent = js.used_checkpoint ? 'Played best checkpoint' : 'No checkpoint found (played random init)';
+      } else {
+        snapStatus.textContent = 'Error: ' + (js.error || 'unknown');
+      }
+    }catch(e){ snapStatus.textContent = 'Error'; }
+    setTimeout(()=>{ if(snapStatus.textContent.startsWith('Error') || snapStatus.textContent.includes('checkpoint')) snapStatus.textContent=''; }, 4000);
+  });
+}
+
 // (Episode reward list removed)
 
 // (Training config exploration removed)
@@ -685,7 +703,7 @@ ws.onmessage = (event)=>{
       epsilonChart.update('none');
     }
     if(componentsChart && msg.reward_components){
-      const order = ['line_reward','survival','delta_stable','hole_penalty','top_out'];
+  const order = ['line_reward','survival','delta_stable','hole_penalty','bumpiness_penalty','height_penalty','transition_penalty','buried_penalty','overhang_penalty','landing_penalty','ready_bonus','well_bonus','blocked_well_penalty','top_out'];
       componentsChart.data.datasets[0].data = order.map(k=> msg.reward_components[k] ?? 0);
       componentsChart.update('none');
     }

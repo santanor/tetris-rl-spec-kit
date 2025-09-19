@@ -16,11 +16,12 @@ class RewardConfig:
     top_out_penalty:        Large negative on episode termination.
     """
 
-    # Line clear rewards (bigger than shaping terms)
+    # Line clear rewards (exaggerate Tetris clears strongly)
+    # Example from request: 1=1, 2=3, 3=5, 4=20. Scale up to keep magnitudes meaningful.
     line_reward_1: float = 10.0
     line_reward_2: float = 30.0
-    line_reward_3: float = 60.0
-    line_reward_4: float = 120.0
+    line_reward_3: float = 50.0
+    line_reward_4: float = 200.0
 
     # Survival incentive (per step while not terminal)
     survival_reward: float = 0.02
@@ -28,11 +29,30 @@ class RewardConfig:
     # Reward when a lock does NOT increase skyline delta (max - min)
     delta_stable_reward: float = 0.2
 
-    # Penalty per newly created hole on lock
-    hole_penalty_per: float = -0.2
+    # Penalty per newly created hole on lock (scaled with count)
+    hole_penalty_per: float = -0.05
+
+    # New shaping knobs
+    # Penalize rough surfaces (bumpiness/roughness)
+    bumpiness_penalty_scale: float = -0.005
+    # Penalize tall stacks via max height
+    height_penalty_scale: float = -0.01
+    # Reward line-clear efficiency: extra bonus for multi-line clears vs singles
+    # e.g., 2-lines gets extra +efficiency_bonus_base*(2-1), etc.
+    efficiency_bonus_base: float = 0.5
 
     # Terminal penalty
     top_out_penalty: float = -8.0
+
+    # Additional shaping terms (small magnitudes)
+    row_transition_penalty: float = -0.001
+    col_transition_penalty: float = -0.001
+    buried_block_penalty: float = -0.002
+    landing_height_penalty: float = -0.01
+    ready_line_bonus: float = 0.2
+    well_usage_bonus: float = 0.5
+    overhang_penalty: float = -0.01
+    blocked_well_penalty: float = -0.02
 
     def line_table(self) -> Dict[int, float]:
         return {1: self.line_reward_1, 2: self.line_reward_2, 3: self.line_reward_3, 4: self.line_reward_4}
