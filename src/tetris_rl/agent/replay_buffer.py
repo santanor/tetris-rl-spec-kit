@@ -23,6 +23,11 @@ class ReplayBuffer:
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size: int):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        if batch_size > len(self.memory):
+            # Defensive: caller should have checked, but avoid crashing
+            batch_size = len(self.memory)
         batch = self.rng.sample(self.memory, batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
         # Efficient stacking: states / next_states are tuples of np.ndarray with identical shapes.

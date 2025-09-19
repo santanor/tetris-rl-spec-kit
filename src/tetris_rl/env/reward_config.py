@@ -5,50 +5,34 @@ from typing import Dict, Any
 
 @dataclass
 class RewardConfig:
-    """Minimal reward configuration with mild structural shaping.
+    """Reward configuration matching the simplified rules.
 
     Components
     -----------
-    line_reward_[1-4]:  Monotonic rewards for clearing 1..4 lines.
-    survival_reward:    Small per non-terminal step reward (longevity).
-    top_out_penalty:    Large negative on episode termination (discourage topping out).
-    placement shaping:  On every piece lock we compare hole count (before vs after).
-        * If holes_after > holes_before  -> placement_hole_penalty (negative)
-        * Else (maintain or reduce)      -> placement_no_hole_reward (positive)
-
-    Design intent: Placement shaping accelerates learning of "avoid creating new holes"
-    without encoding full handcrafted heuristics (aggregate height, bumpiness). Its
-    magnitudes are intentionally smaller than typical multi-line clear bonuses so that
-    clearing lines remains the dominant objective.
+    line_reward_[1-4]:      Big rewards for clearing 1..4 lines.
+    survival_reward:        Small per non-terminal step reward (staying alive).
+    delta_stable_reward:    Small reward when a lock does not increase (max_height - min_height).
+    hole_penalty_per:       Penalty per newly created hole on lock.
+    top_out_penalty:        Large negative on episode termination.
     """
 
-    # Line clear rewards (simple & monotonic)
-    line_reward_1: float = 5.0
-    line_reward_2: float = 8.0
-    line_reward_3: float = 12.0
-    line_reward_4: float = 20.0
+    # Line clear rewards (bigger than shaping terms)
+    line_reward_1: float = 10.0
+    line_reward_2: float = 30.0
+    line_reward_3: float = 60.0
+    line_reward_4: float = 120.0
 
-    # Survival incentive
+    # Survival incentive (per step while not terminal)
     survival_reward: float = 0.02
+
+    # Reward when a lock does NOT increase skyline delta (max - min)
+    delta_stable_reward: float = 0.2
+
+    # Penalty per newly created hole on lock
+    hole_penalty_per: float = -0.2
 
     # Terminal penalty
     top_out_penalty: float = -8.0
-
-    # Placement shaping (Option B applied: boost positive signal while keeping penalty magnitude)
-    placement_no_hole_reward: float = 0.6
-    placement_hole_penalty: float = -0.2
-
-    # Flat reward per piece lock (Option C) – small dense signal to help early learning.
-    # Applied on every lock (including the terminal one) in addition to placement shaping.
-    lock_reward: float = 0.05
-
-    # Skyline shaping (new): encourage flattening / gap filling vs creating tall towers.
-    # We examine the tallest column vs second tallest after a lock.
-    # If the max height increases AND (max-second)/20 > skyline_spread_threshold -> penalty.
-    # Else (including when filling gaps or clearing lines) -> reward.
-    skyline_flat_reward: float = 0.4
-    skyline_raise_penalty: float = -0.5
-    skyline_spread_threshold: float = 0.15  # ~3 rows difference on 20-high board
 
     def line_table(self) -> Dict[int, float]:
         return {1: self.line_reward_1, 2: self.line_reward_2, 3: self.line_reward_3, 4: self.line_reward_4}

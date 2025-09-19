@@ -15,6 +15,10 @@ const recentEpisodes = [];
 const colorBoard = document.getElementById('colorBoard');
 const configForm = document.getElementById('rewardConfigForm');
 const configStatus = document.getElementById('configStatus');
+const earlyStopForm = document.getElementById('earlyStopForm');
+const earlyStopStatus = document.getElementById('earlyStopStatus');
+const trainPerfForm = document.getElementById('trainPerfForm');
+const trainPerfStatus = document.getElementById('trainPerfStatus');
 // Removed exploration, model config, resume, charts for simplified UI
 
 // (Charts removed)
@@ -54,10 +58,10 @@ function initCharts(){
   componentsChart = new Chart(compCtx,{
     type:'bar',
     data:{
-      labels:['line_reward','survival','placement','lock','skyline','top_out'],
+      labels:['line_reward','survival','delta_stable','hole_penalty','top_out'],
       datasets:[{
         label:'Value',
-        data:[0,0,0,0,0,0],
+        data:[0,0,0,0,0],
         backgroundColor:(ctx)=>{ const v = ctx.raw; return (typeof v === 'number' && v >= 0) ? '#10b981' : '#ef4444'; }
       }]
     },
@@ -71,30 +75,7 @@ function initCharts(){
       },
       plugins:{
         legend:{ display:false },
-        tooltip:{
-          callbacks:{
-            label:(ctx)=>{
-              try {
-                const label = ctx.label;
-                const rawVal = ctx.raw ?? 0;
-                const raw = (typeof rawVal === 'number') ? rawVal : parseFloat(rawVal) || 0;
-                const ds = ctx.chart.data.datasets[0].data;
-                const sum = ds.reduce((a,b)=> a + (typeof b==='number'? b : (parseFloat(b)||0)), 0);
-                const pct = sum ? (raw / (sum||1) * 100).toFixed(1) : '0.0';
-                let expl = '';
-                if(label==='line_reward') expl = 'Lines cleared this step (multi-line bonus).';
-                else if(label==='survival') expl = 'Alive step bonus (non-terminal).';
-                else if(label==='placement') expl = 'Hole avoidance / creation shaping on lock.';
-                else if(label==='lock') expl = 'Flat reward each piece lock.';
-                else if(label==='skyline') expl = 'Flattening reward or spike penalty based on tallest column spread.';
-                else if(label==='top_out') expl = 'Penalty when topping out.';
-                return `${label}: ${raw.toFixed(3)} (${pct}% of step total)\n${expl}`;
-              } catch(err){
-                return ctx.label + ': ' + ctx.raw;
-              }
-            }
-          }
-        }
+        tooltip:{ enabled:true }
       }
     }
   });
@@ -367,6 +348,43 @@ async function loadConfig(){
 }
 loadConfig();
 
+async function loadEarlyStop(){
+  if(!earlyStopForm) return;
+  try{
+    const r = await fetch('/api/early-stop-config');
+    if(!r.ok) return;
+    const cfg = await r.json();
+    [...earlyStopForm.elements].forEach(el=>{
+      if(!el.name) return;
+      const k = el.name;
+      if(!(k in cfg)) return;
+      if(el.type === 'checkbox'){
+        el.checked = !!cfg[k];
+      } else {
+        el.value = cfg[k];
+      }
+    });
+  }catch(e){}
+}
+loadEarlyStop();
+
+async function loadTrainPerf(){
+  if(!trainPerfForm) return;
+  try{
+    const r = await fetch('/api/train-perf-config');
+    if(!r.ok) return;
+    const cfg = await r.json();
+    [...trainPerfForm.elements].forEach(el=>{
+      if(!el.name) return;
+      const k = el.name;
+      if(!(k in cfg)) return;
+      if(el.type === 'checkbox') el.checked = !!cfg[k];
+      else el.value = cfg[k];
+    });
+  }catch(e){}
+}
+loadTrainPerf();
+
 if(configForm){
   configForm.addEventListener('submit', async (e)=>{
     e.preventDefault();
@@ -383,6 +401,46 @@ if(configForm){
     } catch(err){
       configStatus.textContent = 'Error';
     }
+  });
+}
+
+if(earlyStopForm){
+  earlyStopForm.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const data = {};
+    [...earlyStopForm.elements].forEach(el=>{
+      if(!el.name) return;
+      if(el.type === 'checkbox') data[el.name] = el.checked;
+      else data[el.name] = el.value;
+    });
+    earlyStopStatus.textContent = 'Updating...';
+    try{
+      const resp = await fetch('/api/early-stop-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data)});
+      const js = await resp.json();
+      if(js.status === 'ok') earlyStopStatus.textContent = `Updated ${js.updated} fields`;
+      else earlyStopStatus.textContent = 'Error';
+      setTimeout(()=>{ earlyStopStatus.textContent=''; }, 2500);
+    }catch(err){ earlyStopStatus.textContent = 'Error'; }
+  });
+}
+
+if(trainPerfForm){
+  trainPerfForm.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const data = {};
+    [...trainPerfForm.elements].forEach(el=>{
+      if(!el.name) return;
+      if(el.type === 'checkbox') data[el.name] = el.checked;
+      else data[el.name] = el.value;
+    });
+    trainPerfStatus.textContent = 'Updating...';
+    try{
+      const resp = await fetch('/api/train-perf-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data)});
+      const js = await resp.json();
+      if(js.status === 'ok') trainPerfStatus.textContent = `Updated ${js.updated} fields`;
+      else trainPerfStatus.textContent = 'Error';
+      setTimeout(()=>{ trainPerfStatus.textContent=''; }, 2500);
+    }catch(err){ trainPerfStatus.textContent = 'Error'; }
   });
 }
 
@@ -579,6 +637,29 @@ ws.onmessage = (event)=>{
     }
   } else if(msg.type === 'broadcast_config_update'){
     if(broadcastEveryInput){ broadcastEveryInput.value = msg.broadcast_every; }
+  } else if(msg.type === 'early_stop_config_update'){
+    // Sync early stop form
+    if(earlyStopForm){
+      const cfg = msg.config || {};
+      [...earlyStopForm.elements].forEach(el=>{
+        if(!el.name) return;
+        const k = el.name;
+        if(!(k in cfg)) return;
+        if(el.type === 'checkbox') el.checked = !!cfg[k];
+        else el.value = cfg[k];
+      });
+    }
+  } else if(msg.type === 'train_perf_config_update'){
+    if(trainPerfForm){
+      const cfg = msg.config || {};
+      [...trainPerfForm.elements].forEach(el=>{
+        if(!el.name) return;
+        const k = el.name;
+        if(!(k in cfg)) return;
+        if(el.type === 'checkbox') el.checked = !!cfg[k];
+        else el.value = cfg[k];
+      });
+    }
   }
   // Per-step streaming updates for loss + reward components
   if(msg.type === 'step'){
@@ -604,7 +685,7 @@ ws.onmessage = (event)=>{
       epsilonChart.update('none');
     }
     if(componentsChart && msg.reward_components){
-      const order = ['line_reward','survival','top_out'];
+      const order = ['line_reward','survival','delta_stable','hole_penalty','top_out'];
       componentsChart.data.datasets[0].data = order.map(k=> msg.reward_components[k] ?? 0);
       componentsChart.update('none');
     }

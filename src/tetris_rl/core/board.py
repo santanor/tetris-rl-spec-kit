@@ -160,14 +160,34 @@ class TetrisBoard:
     # --- Features ---
     def holes(self) -> int:
         holes = 0
+        grid = self.grid
         for x in range(WIDTH):
             block_seen = False
+            col_has = False
             for y in range(HEIGHT):
-                if self.grid[y][x]:
+                cell = grid[y][x]
+                if cell:
                     block_seen = True
-                elif block_seen and not self.grid[y][x]:
+                    col_has = True
+                elif block_seen:
                     holes += 1
+            # small branch prediction hint variable kept (col_has)
         return holes
+
+    def per_column_holes(self) -> List[int]:
+        """Return count of holes per column (empty after the first filled cell)."""
+        counts: List[int] = [0]*WIDTH
+        grid = self.grid
+        for x in range(WIDTH):
+            block_seen = False
+            c = 0
+            for y in range(HEIGHT):
+                if grid[y][x]:
+                    block_seen = True
+                elif block_seen:
+                    c += 1
+            counts[x] = c
+        return counts
 
     def hole_columns(self) -> int:
         """Number of columns that contain at least one hole (empty after first filled)."""
@@ -208,24 +228,26 @@ class TetrisBoard:
 
     def aggregate_height(self) -> int:
         h = 0
+        grid = self.grid
         for x in range(WIDTH):
             col_h = 0
             for y in range(HEIGHT):
-                if self.grid[y][x]:
+                if grid[y][x]:
                     col_h = HEIGHT - y
                     break
             h += col_h
         return h
 
     def heights(self) -> List[int]:
-        vals: List[int] = []
+        vals: List[int] = [0]*WIDTH
+        grid = self.grid
         for x in range(WIDTH):
             col_h = 0
             for y in range(HEIGHT):
-                if self.grid[y][x]:
+                if grid[y][x]:
                     col_h = HEIGHT - y
                     break
-            vals.append(col_h)
+            vals[x] = col_h
         return vals
 
     def bumpiness(self) -> int:
@@ -291,3 +313,172 @@ class TetrisBoard:
             "active_cells": active_cells,
             "palette": palette,
         }
+
+    # --- Helpers for observation simulation ---
+    def active_shape_cells(self, rotation: Optional[int] = None) -> List[Tuple[int, int]]:
+        """Return the relative shape cells of the current active piece at given rotation.
+
+        If rotation is None, uses the current active rotation.
+        Returns an empty list if there is no active piece.
+        """
+        if not self.active:
+            return []
+        kind = self.active.kind
+        r = self.active.rotation if rotation is None else rotation
+        shape = PIECES[kind][r % len(PIECES[kind])]
+        return list(shape)
+
+    def simulate_drop_at_left(self, x_left: int) -> dict:
+        """Simulate hard-dropping the current piece with its leftmost occupied cell at x_left.
+
+        Returns a dict with:
+          { 'valid': bool, 'y': int | None, 'heights_after': List[int] | None, 'holes_after': int | None }
+
+        Policy:
+          - If invalid alignment (out of bounds or no non-colliding y), returns {'valid': False, ...}.
+          - Does not mutate board state.
+        """
+        if not self.active:
+            return {"valid": False, "y": None, "heights_after": None, "holes_after": None}
+
+        # Determine shape extents
+        shape = self.active_shape_cells()
+        if not shape:
+            return {"valid": False, "y": None, "heights_after": None, "holes_after": None}
+        min_dx = min(dx for dx, _ in shape)
+        max_dx = max(dx for dx, _ in shape)
+        width_shape = (max_dx - min_dx + 1)
+
+        # Compute piece.x so that leftmost occupied cell aligns with x_left
+        piece_x = x_left - min_dx
+        # Quick bounds check for horizontal range
+        if piece_x + min_dx < 0 or piece_x + max_dx >= WIDTH:
+            return {"valid": False, "y": None, "heights_after": None, "holes_after": None}
+
+        # Scan downward to find final y using collision on the current grid
+        last_ok_y: Optional[int] = None
+        # Allow starting above the top to accommodate negative dy in shapes
+        for y in range(-4, HEIGHT):
+            test = ActivePiece(self.active.kind, self.active.rotation, piece_x, y)
+            if not self._collision(test):
+                last_ok_y = y
+            else:
+                # If we've already had a valid y and now colliding, we can stop
+                if last_ok_y is not None:
+                    break
+        if last_ok_y is None:
+            return {"valid": False, "y": None, "heights_after": None, "holes_after": None}
+
+        final_y = last_ok_y
+
+        # Build a temp grid with the piece locked at (piece_x, final_y)
+        temp_grid: List[List[object]] = [row[:] for row in self.grid]
+        for dx, dy in shape:
+            ax = piece_x + dx
+            ay = final_y + dy
+            if 0 <= ax < WIDTH and 0 <= ay < HEIGHT:
+                temp_grid[ay][ax] = self.active.kind  # type: ignore[index]
+        # Compute heights_after
+        heights_after: List[int] = []
+        for x in range(WIDTH):
+            col_h = 0
+            for y in range(HEIGHT):
+                if temp_grid[y][x]:
+                    col_h = HEIGHT - y
+                    break
+            heights_after.append(col_h)
+
+        # Compute holes_after
+        holes_after = 0
+        for x in range(WIDTH):
+            block_seen = False
+            for y in range(HEIGHT):
+                if temp_grid[y][x]:
+                    block_seen = True
+                elif block_seen and not temp_grid[y][x]:
+                    holes_after += 1
+
+        return {"valid": True, "y": final_y, "heights_after": heights_after, "holes_after": holes_after}
+
+    def simulate_drop_stats_at_left(self, x_left: int, y_first: Optional[List[int]] = None) -> dict:
+        """Fast, lightweight drop simulation for a given left alignment.
+
+        Returns a dict with keys:
+          - valid: bool
+          - final_y: int | None
+          - h_after_c: int | None  (predicted height for column=x_left after placement)
+          - created_new: int | None (number of new holes created by placing the piece)
+
+        Notes:
+          - Does not mutate board state.
+          - Does not simulate line clearing (consistent with simulate_drop_at_left).
+          - Uses analytical drop based on first-filled row per column and shape column profiles.
+        """
+        if not self.active:
+            return {"valid": False, "final_y": None, "h_after_c": None, "created_new": None}
+
+        # Shape and horizontal span
+        shape = self.active_shape_cells()
+        if not shape:
+            return {"valid": False, "final_y": None, "h_after_c": None, "created_new": None}
+        min_dx = min(dx for dx, _ in shape)
+        max_dx = max(dx for dx, _ in shape)
+        piece_x = x_left - min_dx
+        if piece_x + min_dx < 0 or piece_x + max_dx >= WIDTH:
+            return {"valid": False, "final_y": None, "h_after_c": None, "created_new": None}
+
+        # Precompute per-dx min/max dy for the shape columns
+        per_dx_min_dy: Dict[int, int] = {}
+        per_dx_max_dy: Dict[int, int] = {}
+        for dx, dy in shape:
+            if dx not in per_dx_min_dy or dy < per_dx_min_dy[dx]:
+                per_dx_min_dy[dx] = dy
+            if dx not in per_dx_max_dy or dy > per_dx_max_dy[dx]:
+                per_dx_max_dy[dx] = dy
+
+        # Determine the first filled cell (from top) per column -> y_first
+        if y_first is None:
+            # Derive from current heights for efficiency
+            heights = self.heights()
+            y_first = [HEIGHT - h if h > 0 else HEIGHT for h in heights]
+
+        # Compute analytical final y: constrained by each column's lowest shape block
+        final_y = HEIGHT  # start high, take min
+        for dx, dy_max in per_dx_max_dy.items():
+            col = piece_x + dx
+            if col < 0 or col >= WIDTH:
+                return {"valid": False, "final_y": None, "h_after_c": None, "created_new": None}
+            limit = y_first[col] - 1 - dy_max
+            if limit < final_y:
+                final_y = limit
+        if final_y is None:
+            return {"valid": False, "final_y": None, "h_after_c": None, "created_new": None}
+
+        # Predicted height for column c == x_left (leftmost occupied column)
+        c = x_left
+        dy_min_left = per_dx_min_dy.get(min_dx, 0)
+        y_new_top_c = final_y + dy_min_left
+        old_y_first_c = y_first[c]
+        new_y_first_c = old_y_first_c if y_new_top_c >= old_y_first_c else y_new_top_c
+        h_after_c = 0 if new_y_first_c >= HEIGHT else (HEIGHT - new_y_first_c)
+
+        # Compute newly created holes by scanning only affected ranges per overlapped column
+        created_new = 0
+        for dx, dy_min in per_dx_min_dy.items():
+            col = piece_x + dx
+            y_top_new = final_y + dy_min  # topmost new block in this column
+            old_yf = y_first[col]
+            if y_top_new < old_yf:
+                # Empty cells in (y_top_new+1 .. old_yf-1) become holes if empty in original grid
+                start_y = y_top_new + 1
+                end_y = old_yf  # exclusive
+                if start_y < 0:
+                    start_y = 0
+                if end_y > HEIGHT:
+                    end_y = HEIGHT
+                for y in range(start_y, end_y):
+                    # Only count if originally empty (we don't modify grid here)
+                    if 0 <= y < HEIGHT and not self.grid[y][col]:
+                        created_new += 1
+
+        return {"valid": True, "final_y": final_y, "h_after_c": h_after_c, "created_new": created_new}

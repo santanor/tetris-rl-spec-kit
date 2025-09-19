@@ -24,6 +24,28 @@ training_task: Optional[asyncio.Task] = None
 reward_config = RewardConfig()  # shared minimal reward config
 broadcast_every: int = 1  # dynamically adjustable cadence
 training_mode: str = "idle"  # 'idle' | 'dashboard' | 'headless'
+
+# Early stopping shared config (used by both dashboard and headless modes)
+early_stop_config: Dict[str, Any] = {
+    "early_stop_enable": False,
+    "early_stop_metric": "avg_reward",  # or 'avg_lines'
+    "early_stop_window": 10,
+    "early_stop_min_delta": 0.01,
+    "early_stop_patience": 3,
+}
+
+# Training performance / GPU utilization config
+train_perf_config: Dict[str, Any] = {
+    "use_amp": True,
+    "opt_steps_per_env_step": 8,
+    "grad_clip_norm": 10.0,
+    "compile_model": False,
+    "pin_memory": True,
+    # additional knobs to better saturate GPU
+    "batch_size": 2048,
+    "min_replay": 6000,
+    "target_sync": 500,
+}
 headless_stats: Dict[str, Any] = {
     "episodes": 0,
     "last_reward": 0.0,
@@ -35,13 +57,15 @@ headless_stats: Dict[str, Any] = {
     "avg_components": {
         "line_reward": 0.0,
         "survival": 0.0,
-        "placement": 0.0,
+        "delta_stable": 0.0,
+        "hole_penalty": 0.0,
         "top_out": 0.0,
     },
     "last_components": {
         "line_reward": 0.0,
         "survival": 0.0,
-        "placement": 0.0,
+        "delta_stable": 0.0,
+        "hole_penalty": 0.0,
         "top_out": 0.0,
     },
 }
@@ -101,6 +125,28 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
 
     # Configure training
     cfg = TrainingConfig(episodes=episodes, device=device_str)
+    # Apply early stop shared config
+    try:
+        cfg.early_stop_enable = bool(early_stop_config.get("early_stop_enable", False))
+        cfg.early_stop_metric = str(early_stop_config.get("early_stop_metric", cfg.early_stop_metric))
+        cfg.early_stop_window = int(early_stop_config.get("early_stop_window", cfg.early_stop_window))
+        cfg.early_stop_min_delta = float(early_stop_config.get("early_stop_min_delta", cfg.early_stop_min_delta))
+        cfg.early_stop_patience = int(early_stop_config.get("early_stop_patience", cfg.early_stop_patience))
+    except Exception:
+        pass
+    # Apply training perf config
+    try:
+        cfg.use_amp = bool(train_perf_config.get("use_amp", cfg.use_amp))
+        cfg.opt_steps_per_env_step = int(train_perf_config.get("opt_steps_per_env_step", cfg.opt_steps_per_env_step))
+        cfg.grad_clip_norm = float(train_perf_config.get("grad_clip_norm", cfg.grad_clip_norm))
+        cfg.compile_model = bool(train_perf_config.get("compile_model", cfg.compile_model))
+        cfg.pin_memory = bool(train_perf_config.get("pin_memory", cfg.pin_memory))
+        # extra knobs
+        cfg.batch_size = int(train_perf_config.get("batch_size", cfg.batch_size))
+        cfg.min_replay = int(train_perf_config.get("min_replay", cfg.min_replay))
+        cfg.target_sync = int(train_perf_config.get("target_sync", cfg.target_sync))
+    except Exception:
+        pass
     session_reward = 0.0
 
     # Step callback invoked from trainer.run_training
@@ -146,6 +192,7 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
         ep_reward = 0.0
         ep_lines = 0
         action_counts = {"random":0, "greedy":0}
+        meta = {"epsilon": None}
         while not (done or truncated):
             state_t = torch.tensor(state, dtype=torch.float32, device=device)
             action, meta = select_action(policy_net, state_t, global_step, cfg, 5)
@@ -204,7 +251,7 @@ async def training_loop(output_dir: Path, episodes: int, device_str: str = "auto
             "reward": ep_reward,
             "line_clears": ep_lines,
             "action_dist": action_dist,
-            "last_epsilon": meta.get("epsilon"),
+            "last_epsilon": meta.get("epsilon") if isinstance(meta, dict) else None,
             "last_temperature": None,
         })
         env.close()
@@ -300,6 +347,27 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
     training_mode = "headless"
     cfg = TrainingConfig(episodes=episodes if not infinite else 1, device=device_str)  # episodes reused per cycle if infinite
     cfg.seed = seed
+    # Apply early stop shared config
+    try:
+        cfg.early_stop_enable = bool(early_stop_config.get("early_stop_enable", False))
+        cfg.early_stop_metric = str(early_stop_config.get("early_stop_metric", cfg.early_stop_metric))
+        cfg.early_stop_window = int(early_stop_config.get("early_stop_window", cfg.early_stop_window))
+        cfg.early_stop_min_delta = float(early_stop_config.get("early_stop_min_delta", cfg.early_stop_min_delta))
+        cfg.early_stop_patience = int(early_stop_config.get("early_stop_patience", cfg.early_stop_patience))
+    except Exception:
+        pass
+    # Apply training perf config
+    try:
+        cfg.use_amp = bool(train_perf_config.get("use_amp", cfg.use_amp))
+        cfg.opt_steps_per_env_step = int(train_perf_config.get("opt_steps_per_env_step", cfg.opt_steps_per_env_step))
+        cfg.grad_clip_norm = float(train_perf_config.get("grad_clip_norm", cfg.grad_clip_norm))
+        cfg.compile_model = bool(train_perf_config.get("compile_model", cfg.compile_model))
+        cfg.pin_memory = bool(train_perf_config.get("pin_memory", cfg.pin_memory))
+        cfg.batch_size = int(train_perf_config.get("batch_size", cfg.batch_size))
+        cfg.min_replay = int(train_perf_config.get("min_replay", cfg.min_replay))
+        cfg.target_sync = int(train_perf_config.get("target_sync", cfg.target_sync))
+    except Exception:
+        pass
     rng = _rnd.Random(cfg.seed)
     # Probe obs dim
     probe_env = TetrisEnv(seed=rng.randint(0,1_000_000), max_steps=cfg.max_steps, reward_config=reward_config)
@@ -311,7 +379,21 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
     target_net = DQN((obs_dim,), 5, hidden_layers=cfg.hidden_layers or [64,64])
     target_net.load_state_dict(policy_net.state_dict())
     policy_net.to(device); target_net.to(device)
+    # Optional compile for faster forward passes
+    policy_exec: torch.nn.Module = policy_net  # type: ignore[assignment]
+    target_exec: torch.nn.Module = target_net  # type: ignore[assignment]
+    if cfg.compile_model:
+        try:
+            policy_exec = torch.compile(policy_net)  # type: ignore[attr-defined, assignment]
+            target_exec = torch.compile(target_net)  # type: ignore[attr-defined, assignment]
+        except Exception:
+            policy_exec = policy_net  # type: ignore[assignment]
+            target_exec = target_net  # type: ignore[assignment]
     optimizer = torch.optim.Adam(policy_net.parameters(), lr=cfg.lr)
+    try:
+        scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda' and cfg.use_amp))  # type: ignore[attr-defined]
+    except Exception:
+        scaler = None
     buffer = ReplayBuffer(capacity=cfg.replay_capacity, seed=cfg.seed)
     global_step = 0
     episode_counter = 0
@@ -337,15 +419,19 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                 ep_reward = 0.0; ep_lines = 0
                 ep_line = 0.0
                 ep_surv = 0.0
-                ep_place = 0.0
+                ep_delta = 0.0
+                ep_hole = 0.0
                 ep_top = 0.0
                 while not (done or truncated):
                     state_t = torch.tensor(state, dtype=torch.float32, device=device)
-                    action, meta = select_action(policy_net, state_t, global_step, cfg, 5)
+                    action, meta = select_action(policy_exec, state_t, global_step, cfg, 5)
                     next_state, reward, done, truncated, info = env.step(action)
                     buffer.push(state, action, reward, next_state, done or truncated)
                     if (global_step % opt_every) == 0:
-                        loss_val = optimize(policy_net, target_net, buffer, cfg, optimizer, device)
+                        # Perform potentially multiple optimization steps per env step to increase GPU work density
+                        loss_val = 0.0
+                        for _ in range(max(1, int(cfg.opt_steps_per_env_step))):
+                            loss_val = optimize(policy_exec, target_exec, buffer, cfg, optimizer, device, scaler)
                     else:
                         loss_val = 0.0
                     if global_step % cfg.target_sync == 0:
@@ -356,7 +442,8 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                     rc = info.get("reward_components", {})
                     ep_line += rc.get("line_reward", 0.0)
                     ep_surv += rc.get("survival", 0.0)
-                    ep_place += rc.get("placement", 0.0)
+                    ep_delta += rc.get("delta_stable", 0.0)
+                    ep_hole += rc.get("hole_penalty", 0.0)
                     # top_out component only applied once at termination; accumulate anyway
                     ep_top += rc.get("top_out", 0.0)
                     global_step += 1
@@ -367,7 +454,8 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                 comp_window.append({
                     "line_reward": ep_line,
                     "survival": ep_surv,
-                    "placement": ep_place,
+                    "delta_stable": ep_delta,
+                    "hole_penalty": ep_hole,
                     "top_out": ep_top,
                 })
                 if len(reward_window) > 100:
@@ -378,10 +466,11 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                 if comp_window:
                     avg_line = sum(c["line_reward"] for c in comp_window)/len(comp_window)
                     avg_surv = sum(c["survival"] for c in comp_window)/len(comp_window)
-                    avg_place = sum(c["placement"] for c in comp_window)/len(comp_window)
+                    avg_delta = sum(c["delta_stable"] for c in comp_window)/len(comp_window)
+                    avg_hole = sum(c["hole_penalty"] for c in comp_window)/len(comp_window)
                     avg_top = sum(c["top_out"] for c in comp_window)/len(comp_window)
                 else:
-                    avg_line = avg_surv = avg_place = avg_top = 0.0
+                    avg_line = avg_surv = avg_delta = avg_hole = avg_top = 0.0
                 headless_stats.update({
                     "episodes": episode_counter,
                     "last_reward": ep_reward,
@@ -393,13 +482,15 @@ async def _headless_loop(episodes: int, device_str: str, seed: int, infinite: bo
                     "last_components": {
                         "line_reward": ep_line,
                         "survival": ep_surv,
-                        "placement": ep_place,
+                        "delta_stable": ep_delta,
+                        "hole_penalty": ep_hole,
                         "top_out": ep_top,
                     },
                     "avg_components": {
                         "line_reward": avg_line,
                         "survival": avg_surv,
-                        "placement": avg_place,
+                        "delta_stable": avg_delta,
+                        "hole_penalty": avg_hole,
                         "top_out": avg_top,
                     },
                 })
@@ -443,6 +534,72 @@ async def update_reward_config(payload: Dict[str, Any]):
     # Broadcast new config to all clients
     await broadcast({"type": "config_update", "config": reward_config.to_dict()})
     return {"updated": updated, "errors": errors, "config": reward_config.to_dict()}
+
+@app.get("/api/early-stop-config")
+async def get_early_stop_config():
+    return dict(early_stop_config)
+
+@app.post("/api/early-stop-config")
+async def update_early_stop_config(payload: Dict[str, Any]):
+    global early_stop_config
+    if not isinstance(payload, dict):
+        return {"status": "error", "error": "invalid-payload"}
+    updated = 0
+    errors: Dict[str, str] = {}
+    schema = {
+        "early_stop_enable": bool,
+        "early_stop_metric": str,
+        "early_stop_window": int,
+        "early_stop_min_delta": float,
+        "early_stop_patience": int,
+    }
+    for k, caster in schema.items():
+        if k in payload:
+            try:
+                v = payload[k]
+                # Special-case bool that might come as "true"/"false" strings
+                if caster is bool and isinstance(v, str):
+                    v = v.strip().lower() in ("1","true","yes","on")
+                early_stop_config[k] = caster(v)
+                updated += 1
+            except Exception:
+                errors[k] = "invalid"
+    await broadcast({"type": "early_stop_config_update", "config": dict(early_stop_config)})
+    return {"status": "ok", "updated": updated, "errors": errors, "config": dict(early_stop_config)}
+
+@app.get("/api/train-perf-config")
+async def get_train_perf_config():
+    return dict(train_perf_config)
+
+@app.post("/api/train-perf-config")
+async def update_train_perf_config(payload: Dict[str, Any]):
+    global train_perf_config
+    if not isinstance(payload, dict):
+        return {"status": "error", "error": "invalid-payload"}
+    updated = 0
+    errors: Dict[str, str] = {}
+    schema = {
+        "use_amp": bool,
+        "opt_steps_per_env_step": int,
+        "grad_clip_norm": float,
+        "compile_model": bool,
+        "pin_memory": bool,
+        "batch_size": int,
+        "min_replay": int,
+        "target_sync": int,
+    }
+    for k, caster in schema.items():
+        if k in payload:
+            try:
+                v = payload[k]
+                if caster is bool and isinstance(v, str):
+                    v = v.strip().lower() in ("1","true","yes","on")
+                train_perf_config[k] = caster(v)
+                updated += 1
+            except Exception:
+                errors[k] = "invalid"
+    await broadcast({"type": "train_perf_config_update", "config": dict(train_perf_config)})
+    return {"status": "ok", "updated": updated, "errors": errors, "config": dict(train_perf_config)}
 
 ## Removed /api/model-config endpoints (architecture fixed in minimal version)
 

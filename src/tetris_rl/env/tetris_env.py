@@ -28,30 +28,77 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
         self.board = TetrisBoard(seed=seed)
         self.max_steps = max_steps
         self.reward_config = reward_config or RewardConfig()
-        # Observation (Option D structural set):
-        #   10 normalized column heights
-        #   + holes_norm (total holes / 200)
-        #   + bumpiness_norm (sum |h_i-h_{i+1}| / 180)
-        #   + aggregate_height_norm (sum heights / 200)
-        #   + lines_fraction (lines_cleared_total / 200)
-        # => 14 features total
-        self._obs_dim = 14
+        # Build one observation to infer dynamic feature dimension
+        sample_obs = self._build_obs()
+        self._obs_dim = int(len(sample_obs))
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(self._obs_dim,), dtype=np.float32)  # type: ignore[arg-type]
         self.action_space = spaces.Discrete(5)  # type: ignore[arg-type]
         self._step_count = 0
 
     def _build_obs(self):
-        heights = self.board.heights()  # list of 10 ints (0..20)
-        norm_heights = [h / 20.0 for h in heights]
-        holes = self.board.holes()
-        bump = self.board.bumpiness()
-        agg = sum(heights)
-        # Normalizations
-        holes_norm = holes / 200.0  # max theoretical holes = 200 (empty below filled top rows)
-        bump_norm = bump / 180.0    # worst-case 9 gaps * 20 height diff each = 180
-        agg_norm = agg / 200.0      # max aggregate height 10 * 20
-        lines_fraction = self.board.lines_cleared_total / 200.0
-        feats = norm_heights + [holes_norm, bump_norm, agg_norm, lines_fraction]
+        # 1) Current per-column heights (normalized)
+        heights = self.board.heights()  # len 10, ints 0..20
+        norm_heights = [min(max(h / 20.0, 0.0), 1.0) for h in heights]
+
+        # 2) Predicted per-column height if current piece hard-dropped at that column (left alignment)
+        # 6) Predicted holes created if dropped there
+        holes_before_total = self.board.holes()
+        predicted_heights = [0.0] * 10
+        predicted_created_holes = [0.0] * 10
+        # If no active piece, keep zeros (top-out case)
+        if self.board.active is not None:
+            # Precompute first-filled row per column to speed up repeated sims
+            heights_int = self.board.heights()
+            y_first = [20 - h if h > 0 else 20 for h in heights_int]
+            for c in range(10):
+                sim = self.board.simulate_drop_stats_at_left(c, y_first)
+                if sim.get("valid"):
+                    h_after_c = sim.get("h_after_c") or 0
+                    predicted_heights[c] = min(max(h_after_c / 20.0, 0.0), 1.0)
+                    created = max(int(sim.get("created_new") or 0), 0)
+                    predicted_created_holes[c] = min(max(created / 20.0, 0.0), 1.0)
+                else:
+                    # Invalid alignment: discourage via max created holes; keep height as current
+                    predicted_heights[c] = norm_heights[c]
+                    predicted_created_holes[c] = 1.0
+
+        # 3) Current piece and rotation (one-hot 7 + one-hot 4)
+        piece_one_hot = [0.0] * 7
+        rot_one_hot = [0.0] * 4
+        x_norm = 0.0
+        y_norm = 0.0
+        if self.board.active is not None:
+            kind = self.board.active.kind
+            kind_order = ['I', 'O', 'T', 'S', 'Z', 'J', 'L']
+            if kind in kind_order:
+                piece_one_hot[kind_order.index(kind)] = 1.0
+            r = int(self.board.active.rotation % 4)
+            rot_one_hot[r] = 1.0
+            x_norm = min(max(self.board.active.x / 9.0, 0.0), 1.0)
+            # active.y may be <0 during spawn; clamp to [0,19]
+            y_clamped = min(max(self.board.active.y, 0), 19)
+            y_norm = y_clamped / 19.0 if 19 > 0 else 0.0
+
+        # 4) Delta between tallest and shortest columns (normalized)
+        if heights:
+            skyline_delta = (max(heights) - min(heights)) / 20.0
+        else:
+            skyline_delta = 0.0
+
+        # 5) Per-column holes (normalized)
+        holes_per_col = self.board.per_column_holes()
+        norm_holes_per_col = [min(max(hc / 20.0, 0.0), 1.0) for hc in holes_per_col]
+
+        feats = (
+            norm_heights
+            + predicted_heights
+            + piece_one_hot
+            + rot_one_hot
+            + [skyline_delta]
+            + norm_holes_per_col
+            + predicted_created_holes
+            + [x_norm, y_norm]
+        )
         return np.array(feats, dtype=np.float32)
 
     def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):  # type: ignore[override]
@@ -64,12 +111,10 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
         self._step_count += 1
         cfg = self.reward_config
 
-        # Track holes before action IF a lock might happen (we just inspect before calling board.step)
+        # Track state before action for shaping on locks
         holes_before = self.board.holes()
         heights_before = self.board.heights()
-        max_before = max(heights_before) if heights_before else 0
-        sorted_before = sorted(heights_before, reverse=True)
-        second_before = sorted_before[1] if len(sorted_before) > 1 else max_before
+        delta_before = (max(heights_before) - min(heights_before)) if heights_before else 0
 
         lines_delta, top_out, locked = self.board.step(int(action))
 
@@ -77,32 +122,20 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
         line_reward = cfg.line_table().get(lines_delta, 0.0) if lines_delta else 0.0
         survival = cfg.survival_reward if not top_out else 0.0
 
-        # Placement structural shaping (evaluated only when a piece locks and not due to top-out early spawn collision)
-        placement_reward = 0.0
-        lock_flat = 0.0
-        skyline_reward = 0.0
+        # Shaping on lock: delta stability and hole penalty
+        delta_stable = 0.0
+        hole_penalty = 0.0
         if locked:
             holes_after = self.board.holes()
-            if holes_after > holes_before:  # created at least one new hole
-                placement_reward = cfg.placement_hole_penalty
-            else:  # maintained or reduced hole count
-                placement_reward = cfg.placement_no_hole_reward
-            lock_flat = cfg.lock_reward
-            # Skyline shaping: compare tallest column behavior
-            heights_after = self.board.heights()
-            if heights_after:
-                max_after = max(heights_after)
-                sorted_after = sorted(heights_after, reverse=True)
-                second_after = sorted_after[1] if len(sorted_after) > 1 else max_after
-                # If we raised the skyline and the spread is above threshold -> penalty
-                if max_after > max_before and (max_after - second_after)/20.0 > cfg.skyline_spread_threshold:
-                    skyline_reward = cfg.skyline_raise_penalty
-                else:
-                    # Reward any lock that doesn't exacerbate a spike (including filling gaps / flattening)
-                    skyline_reward = cfg.skyline_flat_reward
-        # NOTE: If top_out, we still apply placement shaping for the final lock; can reconsider if noisy.
+            created = max(0, holes_after - holes_before)
+            hole_penalty = cfg.hole_penalty_per * float(created)
 
-        reward = line_reward + survival + placement_reward + lock_flat + skyline_reward
+            heights_after = self.board.heights()
+            delta_after = (max(heights_after) - min(heights_after)) if heights_after else delta_before
+            if delta_after <= delta_before:
+                delta_stable = cfg.delta_stable_reward
+
+        reward = line_reward + survival + delta_stable + hole_penalty
         if top_out:
             reward += cfg.top_out_penalty
 
@@ -117,13 +150,13 @@ class TetrisEnv(gym.Env):  # type: ignore[misc]
                 "holes": self.board.holes(),
                 "bumpiness": self.board.bumpiness(),
                 "aggregate_height": sum(self.board.heights()),
+                "delta_skyline": (max(self.board.heights()) - min(self.board.heights())) if self.board.heights() else 0,
             },
             "reward_components": {
                 "line_reward": line_reward,
                 "survival": survival,
-                "placement": placement_reward,
-                "lock": lock_flat,
-                "skyline": skyline_reward,
+                "delta_stable": delta_stable,
+                "hole_penalty": hole_penalty,
                 "top_out": cfg.top_out_penalty if top_out else 0.0,
                 "total": reward,
                 "config_hash": hash(tuple(sorted(cfg.to_dict().items()))),
