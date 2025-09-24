@@ -1,0 +1,10 @@
+{"index": 0, "total_reward": -16.694000000000003, "lines_cleared": 0, "steps": 74, "terminated": true, "truncated": false, "interrupted": false, "max_height": 103, "holes_final": 51, "notable_flags": []}
+{"index": 1, "total_reward": -17.338000000000005, "lines_cleared": 0, "steps": 43, "terminated": true, "truncated": false, "interrupted": false, "max_height": 93, "holes_final": 35, "notable_flags": []}
+{"index": 2, "total_reward": -14.81, "lines_cleared": 0, "steps": 37, "terminated": true, "truncated": false, "interrupted": false, "max_height": 63, "holes_final": 22, "notable_flags": []}
+{"index": 3, "total_reward": -16.193000000000005, "lines_cleared": 0, "steps": 55, "terminated": true, "truncated": false, "interrupted": false, "max_height": 82, "holes_final": 32, "notable_flags": []}
+{"index": 4, "total_reward": -15.174000000000003, "lines_cleared": 0, "steps": 43, "terminated": true, "truncated": false, "interrupted": false, "max_height": 73, "holes_final": 24, "notable_flags": []}
+{"index": 5, "total_reward": -16.428, "lines_cleared": 0, "steps": 43, "terminated": true, "truncated": false, "interrupted": false, "max_height": 80, "holes_final": 29, "notable_flags": []}
+{"index": 6, "total_reward": -15.55, "lines_cleared": 0, "steps": 40, "terminated": true, "truncated": false, "interrupted": false, "max_height": 74, "holes_final": 24, "notable_flags": []}
+{"index": 7, "total_reward": -15.364, "lines_cleared": 0, "steps": 36, "terminated": true, "truncated": false, "interrupted": false, "max_height": 66, "holes_final": 17, "notable_flags": []}
+{"index": 8, "total_reward": -14.774000000000001, "lines_cleared": 0, "steps": 26, "terminated": true, "truncated": false, "interrupted": false, "max_height": 65, "holes_final": 23, "notable_flags": []}
+{"index": 9, "total_reward": -14.574000000000002, "lines_cleared": 0, "steps": 29, "terminated": true, "truncated": false, "interrupted": false, "max_height": 60, "holes_final": 12, "notable_flags": []}

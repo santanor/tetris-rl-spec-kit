@@ -1,6 +1,276 @@
-# Tetris RL (Minimal Demo)
+# Tetris RL Demo
 
-Clean, small reinforcement learning demo for Tetris using a minimal DQN (plain MLP) and a lightweight real‑time dashboard. All experimental/extra features (multi‑env, complex reward shaping, dueling heads, exploration variants, checkpoint/resume, model hot‑swap) have been removed to keep the code easy to read and hack on.
+A clean, educational reinforcement learning environment for Tetris using DQN with comprehensive observation features and reward shaping.
+
+## Overview
+
+This project provides a complete Tetris environment with:
+- **Rich Observation Space**: 76-dimensional feature vector covering board state, piece information, and strategic features
+- **Sophisticated Reward System**: Multi-component rewards encouraging line clears and strategic play
+- **Real-time Dashboard**: Web-based training visualization with live metrics
+- **Simple Training Scripts**: Easy-to-use headless training and benchmarking
+
+## Quick Start
+
+### Installation
+
+```bash
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install project in development mode
+pip install -e .
+```
+
+### Run Training Demo
+
+```bash
+# Quick 10-episode training demo
+python scripts/train_demo.py
+
+# Benchmark environment performance
+python scripts/bench_headless.py
+```
+
+### Launch Web Dashboard
+
+```bash
+# Start the web dashboard
+python -m uvicorn tetris_rl.web.app:app --reload
+
+# Open http://127.0.0.1:8000 in your browser
+# Click "Start Training" to begin
+```
+
+## Project Structure
+
+```
+src/tetris_rl/
+├── core/
+│   └── board.py              # Core Tetris game logic (10x20 board)
+├── env/
+│   ├── tetris_env.py         # Gymnasium environment wrapper
+│   └── reward_config.py      # Reward configuration system
+├── agent/
+│   ├── dqn.py               # Deep Q-Network implementation
+│   ├── replay_buffer.py     # Experience replay buffer
+│   └── trainer.py           # Training loop and configuration
+├── models/                  # Data models for episodes and sessions
+├── utils/                   # Utilities (seeding, paths)
+└── web/
+    ├── app.py              # FastAPI dashboard backend
+    └── static/             # Dashboard frontend (HTML/JS/CSS)
+
+scripts/
+├── train_demo.py           # Headless training example
+└── bench_headless.py       # Environment benchmarking
+```
+
+## Observation Space (76 dimensions)
+
+The environment provides rich observations designed for strategic Tetris play:
+
+### Core Board Features (40 dims)
+- **Column Heights** (10): Normalized height of each column (0-1)
+- **Predicted Heights** (10): Height after dropping current piece at each column
+- **Per-Column Holes** (10): Number of holes in each column
+- **Predicted Holes Created** (10): New holes if dropping at each column
+
+### Current Piece Information (15 dims)
+- **Piece Type** (7): One-hot encoding for I, O, T, S, Z, J, L pieces
+- **Rotation State** (4): One-hot encoding for 4 rotation states
+- **Position** (2): Normalized x, y coordinates
+- **Skyline Delta** (1): Height difference between tallest and shortest columns
+- **Lines Possible** (1): Lines clearable from current placement
+
+### Strategic Features (17 dims)
+- **Aggregate Metrics** (5): Total height, bumpiness, max well depth, I-piece dependency, ready lines
+- **Surface Analysis** (4): Row/column transitions, buried blocks, overhang cells
+- **Placement Analysis** (3): Landing height, piece contact score, total blocks
+- **Well Analysis** (2): Deep I-wells count, O-gaps count
+- **Future Information** (3): Next piece placeholder (currently zeros)
+
+### Next Piece Preview (7 dims)
+- **Next Piece Type** (7): One-hot encoding (placeholder, currently zeros)
+
+## Action Space
+
+5 discrete actions:
+- **0**: No-op / Natural drop (piece falls one row)
+- **1**: Move left
+- **2**: Move right  
+- **3**: Rotate clockwise
+- **4**: Hard drop (piece falls to bottom immediately)
+
+## Reward System
+
+The reward system uses multiple components to encourage strategic play:
+
+### Line Clear Rewards (Primary)
+- **1 line**: +10.0
+- **2 lines**: +30.0  
+- **3 lines**: +50.0
+- **4 lines (Tetris)**: +200.0
+
+### Continuous Shaping
+- **Survival**: +0.02 per step (encourages staying alive)
+- **Delta Stable**: +0.2 when lock doesn't increase height variance
+- **Top Out**: -8.0 when game ends
+
+### Placement Quality (applied on piece lock)
+- **Holes**: -0.05 per new hole created
+- **Bumpiness**: -0.005 × surface roughness  
+- **Height**: -0.01 × maximum column height
+- **Surface Transitions**: -0.001 × row/column transitions
+- **Strategic Bonuses**: Landing height, ready lines, well usage
+- **Penalties**: Buried blocks, overhangs, blocked wells
+
+The reward components are exposed in `info['reward_components']` for analysis and interpretability.
+
+## Configuration
+
+### Training Configuration
+
+```python
+from tetris_rl.agent.trainer import TrainingConfig
+
+config = TrainingConfig(
+    episodes=100,           # Number of episodes to train
+    max_steps=500,         # Max steps per episode
+    batch_size=64,         # Training batch size
+    gamma=0.99,            # Discount factor
+    lr=1e-3,               # Learning rate
+    epsilon_start=1.0,     # Initial exploration
+    epsilon_end=0.05,      # Final exploration
+    epsilon_decay=300,     # Exploration decay steps
+    hidden_layers=[64,64], # Network architecture
+    device="auto"          # Device selection (auto/cpu/cuda)
+)
+```
+
+### Reward Configuration
+
+```python
+from tetris_rl.env.reward_config import RewardConfig
+
+reward_config = RewardConfig(
+    line_reward_1=10.0,      # Single line reward
+    line_reward_4=200.0,     # Tetris reward
+    survival_reward=0.02,    # Per-step survival
+    hole_penalty_per=-0.05,  # Hole creation penalty
+    # ... many other configurable rewards
+)
+```
+
+## Network Architecture
+
+- **Input**: 76-dimensional observation vector
+- **Hidden Layers**: Configurable MLP (default: [64, 64])
+- **Output**: 5 Q-values (one per action)
+- **Activation**: ReLU
+- **Optimization**: Adam optimizer with Huber loss
+
+## Training Features
+
+### Core DQN Components
+- **Experience Replay**: 20K capacity buffer with random sampling
+- **Target Network**: Synchronized every 200 steps
+- **Epsilon-Greedy**: Exponential decay from 1.0 to 0.05
+- **Device Support**: Automatic GPU detection and usage
+
+### Monitoring & Visualization
+- **Real-time Dashboard**: Live training metrics and board visualization
+- **Episode Tracking**: Complete episode history with rewards and features
+- **Feature Analysis**: Board state visualization and Q-value inspection
+
+## Performance
+
+- **Environment Speed**: ~3,100 steps/sec (headless, CPU)
+- **GPU Training**: Automatic CUDA detection and usage
+- **Memory Efficient**: Configurable replay buffer and batch processing
+
+## Development
+
+### Running Tests
+```bash
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Run code formatting
+black src/ scripts/
+ruff check src/ scripts/
+
+# Type checking
+mypy src/
+```
+
+### Extending the Environment
+- **Observation Features**: Add new features in `TetrisEnv._build_obs()`
+- **Reward Components**: Modify `RewardConfig` and reward calculation
+- **Network Architecture**: Update `DQN` class or training config
+- **Action Space**: Extend actions in `TetrisBoard.step()`
+
+## Examples
+
+### Headless Training
+
+```python
+from pathlib import Path
+from tetris_rl.agent.trainer import run_training, TrainingConfig
+
+# Configure training
+config = TrainingConfig(
+    episodes=50,
+    hidden_layers=[128, 128],
+    device="cuda"
+)
+
+# Run training
+output_dir = Path("training_runs/experiment_1")
+session = run_training(output_dir, config)
+
+print(f"Average reward: {session.avg_reward:.2f}")
+print(f"Average lines: {session.avg_lines_cleared:.1f}")
+```
+
+### Custom Environment
+
+```python
+from tetris_rl.env import TetrisEnv
+from tetris_rl.env.reward_config import RewardConfig
+
+# Create environment with custom rewards
+custom_rewards = RewardConfig(
+    line_reward_4=500.0,      # Higher Tetris reward
+    hole_penalty_per=-0.1,    # Stricter hole penalty
+)
+
+env = TetrisEnv(
+    max_steps=1000,
+    reward_config=custom_rewards,
+    seed=42
+)
+
+obs, info = env.reset()
+# ... training loop
+```
+
+## Research Applications
+
+This environment is designed for:
+- **Interpretable RL**: Rich observations and reward decomposition
+- **Reward Shaping Research**: Configurable multi-component rewards  
+- **Deep RL Baselines**: Standard DQN with modern best practices
+- **Educational Use**: Clear, readable codebase for learning RL concepts
+
+## License
+
+MIT
+
+---
+
+**Note**: This is an educational/research implementation focused on clarity and interpretability rather than competitive Tetris performance. For production Tetris AI, consider more sophisticated features like T-spin detection, advanced rotation systems, and multi-step planning.
 
 ## What You Get
 
